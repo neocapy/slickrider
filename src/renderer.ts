@@ -165,16 +165,14 @@ export class Renderer {
     });
   }
 
-  render(context: GPUCanvasContext, time: number, aspect: number) {
+  render(context: GPUCanvasContext, camera: { yaw: number; height: number; distance: number }, aspect: number) {
     if (!this.depthTexture) return;
 
-    // Camera orbit
-    const angle = time * 0.3;
-    const radius = 6;
-    const elevation = 25 * Math.PI / 180;
-    const cy = Math.sin(elevation) * radius;
-    const cxz = Math.cos(elevation) * radius;
-    const eye: Vec3 = [Math.sin(angle) * cxz, cy, Math.cos(angle) * cxz];
+    const eye: Vec3 = [
+      Math.sin(camera.yaw) * camera.distance,
+      camera.height,
+      Math.cos(camera.yaw) * camera.distance,
+    ];
     const target: Vec3 = [0, 1.5, 0];
 
     const fov = 60 * Math.PI / 180;

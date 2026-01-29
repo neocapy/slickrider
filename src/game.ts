@@ -1,3 +1,4 @@
+import { Input, Action } from "./input";
 import { Renderer } from "./renderer";
 import { Timing } from "./timing";
 
@@ -10,8 +11,15 @@ export class Game {
   private backingHeight = 0;
 
   private timing = new Timing();
+  private input = new Input();
   private debugOverlay = document.getElementById("debug-overlay")!;
   private renderer: Renderer;
+
+  private cameraYaw = 0;
+  private cameraHeight = 2.5;
+  private cameraDistance = 6;
+  private readonly DISTANCES = [6, 10, 20];
+  private cameraDistanceIndex = 0;
 
   // Use Game.create() to construct.
   private constructor(
@@ -98,11 +106,25 @@ export class Game {
   }
 
   private update() {
+    this.input.update();
+    const dt = this.timing.dt;
+
+    this.cameraYaw += (this.input.value(Action.Right) - this.input.value(Action.Left)) * 1.5 * dt;
+    this.cameraHeight += (this.input.value(Action.Up) - this.input.value(Action.Down)) * 3 * dt;
+
+    if (this.input.justPressed(Action.Jump)) {
+      this.cameraDistanceIndex = (this.cameraDistanceIndex + 1) % this.DISTANCES.length;
+      this.cameraDistance = this.DISTANCES[this.cameraDistanceIndex];
+    }
   }
 
   private render() {
     const aspect = this.backingWidth / this.backingHeight || 1;
-    this.renderer.render(this.context, this.timing.totalTime, aspect);
+    this.renderer.render(this.context, {
+      yaw: this.cameraYaw,
+      height: this.cameraHeight,
+      distance: this.cameraDistance,
+    }, aspect);
     this.renderDebugOverlay();
   }
 
