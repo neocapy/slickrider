@@ -20,11 +20,15 @@ export class Game {
 
   private rafId = 0;
   private boundOnResize = this.onResize.bind(this);
-  private boundOnF2 = (e: KeyboardEvent) => {
+  private wireframeMode = false;
+  private boundOnFKeys = (e: KeyboardEvent) => {
     if (e.code === "F2") {
       e.preventDefault();
       const el = this.debugOverlay;
       el.style.display = el.style.display === "none" ? "block" : "none";
+    } else if (e.code === "F3") {
+      e.preventDefault();
+      this.wireframeMode = !this.wireframeMode;
     }
   };
 
@@ -80,7 +84,7 @@ export class Game {
     const query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
     query.addEventListener("change", this.onDprChange.bind(this), { once: true });
 
-    window.addEventListener("keydown", this.boundOnF2);
+    window.addEventListener("keydown", this.boundOnFKeys);
   }
 
   private onResize() {
@@ -107,7 +111,7 @@ export class Game {
   destroy(): void {
     cancelAnimationFrame(this.rafId);
     window.removeEventListener("resize", this.boundOnResize);
-    window.removeEventListener("keydown", this.boundOnF2);
+    window.removeEventListener("keydown", this.boundOnFKeys);
     this.input.destroy();
     this.renderer.destroy();
   }
@@ -142,7 +146,7 @@ export class Game {
       yaw: this.cameraYaw,
       height: this.cameraHeight,
       distance: this.cameraDistance,
-    }, aspect);
+    }, aspect, this.wireframeMode);
     this.renderDebugOverlay();
   }
 

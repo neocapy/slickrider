@@ -145,6 +145,30 @@ struct VSOut {
 }
 `;
 
+const WIREFRAME_SHADER = /* wgsl */`
+struct Uniforms {
+  viewProj: mat4x4<f32>,
+  cameraPos: vec3<f32>,
+};
+@group(0) @binding(0) var<uniform> u: Uniforms;
+
+@vertex fn vs(
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) materialIdx: f32,
+) -> @builtin(position) vec4<f32> {
+  return u.viewProj * vec4<f32>(position, 1.0);
+}
+
+@fragment fn fsFront() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+}
+
+@fragment fn fsBack() -> @location(0) vec4<f32> {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.05);
+}
+`;
+
 const COMPOSITE_SHADER = /* wgsl */`
 struct CompositeUniforms {
   nearFar: vec2<f32>,
@@ -237,6 +261,15 @@ export class Renderer {
   private sharedBindGroupLayout: GPUBindGroupLayout;
   private waterPassBindGroupLayout: GPUBindGroupLayout;
   private compositeBindGroupLayout: GPUBindGroupLayout;
+
+  // Wireframe mode
+  private wireframeDepthPipeline!: GPURenderPipeline;
+  private wireframeFrontPipeline!: GPURenderPipeline;
+  private wireframeBackPipeline!: GPURenderPipeline;
+  private opaqueWireIndexBuffer: GPUBuffer;
+  private transparentWireIndexBuffer: GPUBuffer;
+  private opaqueWireIndexCount: number;
+  private transparentWireIndexCount: number;
 
   constructor(device: GPUDevice, format: GPUTextureFormat, mesh: WorldMesh) {
     this.device = device;
@@ -346,6 +379,68 @@ export class Renderer {
     this.opaqueIndexBuffer = this.createAndUpload(mesh.opaqueIndices, GPUBufferUsage.INDEX);
     this.transparentVertexBuffer = this.createAndUpload(mesh.transparentVertices, GPUBufferUsage.VERTEX);
     this.transparentIndexBuffer = this.createAndUpload(mesh.transparentIndices, GPUBufferUsage.INDEX);
+
+    // Wireframe index buffers: convert triangle indices to line-list edges
+    const toWireIndices = (triIndices: Uint32Array): Uint32Array => {
+      const quadCount = triIndices.length / 6;
+      const out = new Uint32Array(quadCount * 8);
+      for (let q = 0; q < quadCount; q++) {
+        const base = q * 6;
+        const a = triIndices[base], b = triIndices[base + 1], c = triIndices[base + 2], d = triIndices[base + 5];
+        const o = q * 8;
+        out[o] = a; out[o + 1] = b;
+        out[o + 2] = b; out[o + 3] = c;
+        out[o + 4] = c; out[o + 5] = d;
+        out[o + 6] = d; out[o + 7] = a;
+      }
+      return out;
+    };
+    const opaqueWireIndices = toWireIndices(mesh.opaqueIndices);
+    const transparentWireIndices = toWireIndices(mesh.transparentIndices);
+    this.opaqueWireIndexCount = opaqueWireIndices.length;
+    this.transparentWireIndexCount = transparentWireIndices.length;
+    this.opaqueWireIndexBuffer = this.createAndUpload(opaqueWireIndices, GPUBufferUsage.INDEX);
+    this.transparentWireIndexBuffer = this.createAndUpload(transparentWireIndices, GPUBufferUsage.INDEX);
+
+    // Wireframe pipelines
+    const wireModule = device.createShaderModule({ code: WIREFRAME_SHADER });
+    const wireLayout = device.createPipelineLayout({ bindGroupLayouts: [this.sharedBindGroupLayout] });
+
+    // Depth pre-pass: render solid triangles, no color output, just populate depth buffer
+    this.wireframeDepthPipeline = device.createRenderPipeline({
+      layout: wireLayout,
+      vertex: { module: wireModule, entryPoint: "vs", buffers: [vertexBufferLayout] },
+      fragment: { module: wireModule, entryPoint: "fsFront", targets: [{ format, writeMask: 0 }] },
+      primitive: { topology: "triangle-list", cullMode: "back" },
+      depthStencil: { format: this.depthFormat, depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 2 },
+    });
+
+    // Back lines: behind surface → faded
+    this.wireframeBackPipeline = device.createRenderPipeline({
+      layout: wireLayout,
+      vertex: { module: wireModule, entryPoint: "vs", buffers: [vertexBufferLayout] },
+      fragment: {
+        module: wireModule, entryPoint: "fsBack",
+        targets: [{
+          format,
+          blend: {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+          },
+        }],
+      },
+      primitive: { topology: "line-list" },
+      depthStencil: { format: this.depthFormat, depthWriteEnabled: false, depthCompare: "greater" },
+    });
+
+    // Front lines: on or in front of surface → solid
+    this.wireframeFrontPipeline = device.createRenderPipeline({
+      layout: wireLayout,
+      vertex: { module: wireModule, entryPoint: "vs", buffers: [vertexBufferLayout] },
+      fragment: { module: wireModule, entryPoint: "fsFront", targets: [{ format }] },
+      primitive: { topology: "line-list" },
+      depthStencil: { format: this.depthFormat, depthWriteEnabled: false, depthCompare: "less-equal" },
+    });
   }
 
   private createAndUpload(data: Float32Array | Uint32Array, usage: GPUFlagsConstant): GPUBuffer {
@@ -373,6 +468,8 @@ export class Renderer {
     this.opaqueIndexBuffer.destroy();
     this.transparentVertexBuffer.destroy();
     this.transparentIndexBuffer.destroy();
+    this.opaqueWireIndexBuffer.destroy();
+    this.transparentWireIndexBuffer.destroy();
     this.destroyOffscreen();
   }
 
@@ -426,8 +523,8 @@ export class Renderer {
     });
   }
 
-  render(context: GPUCanvasContext, camera: { yaw: number; height: number; distance: number }, aspect: number) {
-    if (!this.opaqueColorTex || !this.opaqueDepthTex || !this.waterColorTex || !this.waterDepthTex) return;
+  render(context: GPUCanvasContext, camera: { yaw: number; height: number; distance: number }, aspect: number, wireframe = false) {
+    if (!this.opaqueDepthTex) return;
 
     const eye: Vec3 = [
       Math.sin(camera.yaw) * camera.distance,
@@ -447,79 +544,157 @@ export class Renderer {
     const camBuf = new Float32Array([eye[0], eye[1], eye[2], 0]);
     this.device.queue.writeBuffer(this.uniformBuffer, 64, camBuf.buffer);
 
-    // Write composite uniforms (near, far)
-    const nearFarBuf = new Float32Array([near, far, 0, 0]);
-    this.device.queue.writeBuffer(this.compositeUniformBuffer, 0, nearFarBuf.buffer);
-
     const commandEncoder = this.device.createCommandEncoder();
 
-    // Pass 1: Opaque → opaqueColor + opaqueDepth
-    {
-      const pass = commandEncoder.beginRenderPass({
-        colorAttachments: [{
-          view: this.opaqueColorTex!.createView(),
-          clearValue: { r: 0.53, g: 0.81, b: 0.92, a: 1.0 },
-          loadOp: "clear",
-          storeOp: "store",
-        }],
-        depthStencilAttachment: {
-          view: this.opaqueDepthTex!.createView(),
-          depthClearValue: 1.0,
-          depthLoadOp: "clear",
-          depthStoreOp: "store",
-        },
-      });
-      pass.setPipeline(this.opaquePipeline);
-      pass.setBindGroup(0, this.sharedBindGroup);
-      pass.setVertexBuffer(0, this.opaqueVertexBuffer);
-      pass.setIndexBuffer(this.opaqueIndexBuffer, "uint32");
-      if (this.opaqueIndexCount > 0) {
-        pass.drawIndexed(this.opaqueIndexCount);
-      }
-      pass.end();
-    }
+    if (wireframe) {
+      const swapView = context.getCurrentTexture().createView();
+      const depthView = this.opaqueDepthTex!.createView();
 
-    // Pass 2: Water → waterColor + waterDepth
-    {
-      const pass = commandEncoder.beginRenderPass({
-        colorAttachments: [{
-          view: this.waterColorTex!.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: "clear",
-          storeOp: "store",
-        }],
-        depthStencilAttachment: {
-          view: this.waterDepthTex!.createView(),
-          depthClearValue: 1.0,
-          depthLoadOp: "clear",
-          depthStoreOp: "store",
-        },
-      });
-      pass.setPipeline(this.waterPipeline);
-      pass.setBindGroup(0, this.sharedBindGroup);
-      pass.setBindGroup(1, this.waterPassBindGroup!);
-      pass.setVertexBuffer(0, this.transparentVertexBuffer);
-      pass.setIndexBuffer(this.transparentIndexBuffer, "uint32");
-      if (this.transparentIndexCount > 0) {
-        pass.drawIndexed(this.transparentIndexCount);
+      // Pass 1: Depth pre-pass — render solid triangles to populate depth buffer, no color writes
+      {
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: swapView,
+            clearValue: { r: 1, g: 1, b: 1, a: 1 },
+            loadOp: "clear",
+            storeOp: "store",
+          }],
+          depthStencilAttachment: {
+            view: depthView,
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        pass.setPipeline(this.wireframeDepthPipeline);
+        pass.setBindGroup(0, this.sharedBindGroup);
+        // Draw opaque triangles
+        pass.setVertexBuffer(0, this.opaqueVertexBuffer);
+        pass.setIndexBuffer(this.opaqueIndexBuffer, "uint32");
+        if (this.opaqueIndexCount > 0) pass.drawIndexed(this.opaqueIndexCount);
+        // Draw transparent triangles
+        pass.setVertexBuffer(0, this.transparentVertexBuffer);
+        pass.setIndexBuffer(this.transparentIndexBuffer, "uint32");
+        if (this.transparentIndexCount > 0) pass.drawIndexed(this.transparentIndexCount);
+        pass.end();
       }
-      pass.end();
-    }
 
-    // Pass 3: Composite → swapchain
-    {
-      const pass = commandEncoder.beginRenderPass({
-        colorAttachments: [{
-          view: context.getCurrentTexture().createView(),
-          loadOp: "clear",
-          clearValue: { r: 0, g: 0, b: 0, a: 1 },
-          storeOp: "store",
-        }],
-      });
-      pass.setPipeline(this.compositePipeline);
-      pass.setBindGroup(0, this.compositeBindGroup!);
-      pass.draw(3);
-      pass.end();
+      // Pass 2: Draw wireframe lines against the populated depth buffer
+      {
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: swapView,
+            loadOp: "load",
+            storeOp: "store",
+          }],
+          depthStencilAttachment: {
+            view: depthView,
+            depthLoadOp: "load",
+            depthStoreOp: "store",
+          },
+        });
+
+        // Back lines first (behind surface, faded)
+        pass.setPipeline(this.wireframeBackPipeline);
+        pass.setBindGroup(0, this.sharedBindGroup);
+        pass.setVertexBuffer(0, this.opaqueVertexBuffer);
+        pass.setIndexBuffer(this.opaqueWireIndexBuffer, "uint32");
+        if (this.opaqueWireIndexCount > 0) pass.drawIndexed(this.opaqueWireIndexCount);
+        pass.setVertexBuffer(0, this.transparentVertexBuffer);
+        pass.setIndexBuffer(this.transparentWireIndexBuffer, "uint32");
+        if (this.transparentWireIndexCount > 0) pass.drawIndexed(this.transparentWireIndexCount);
+
+        // Front lines (on surface, solid)
+        pass.setPipeline(this.wireframeFrontPipeline);
+        pass.setBindGroup(0, this.sharedBindGroup);
+        pass.setVertexBuffer(0, this.opaqueVertexBuffer);
+        pass.setIndexBuffer(this.opaqueWireIndexBuffer, "uint32");
+        if (this.opaqueWireIndexCount > 0) pass.drawIndexed(this.opaqueWireIndexCount);
+        pass.setVertexBuffer(0, this.transparentVertexBuffer);
+        pass.setIndexBuffer(this.transparentWireIndexBuffer, "uint32");
+        if (this.transparentWireIndexCount > 0) pass.drawIndexed(this.transparentWireIndexCount);
+
+        pass.end();
+      }
+    } else {
+      // Normal 3-pass rendering
+      if (!this.opaqueColorTex || !this.waterColorTex || !this.waterDepthTex) {
+        this.device.queue.submit([commandEncoder.finish()]);
+        return;
+      }
+
+      // Write composite uniforms (near, far)
+      const nearFarBuf = new Float32Array([near, far, 0, 0]);
+      this.device.queue.writeBuffer(this.compositeUniformBuffer, 0, nearFarBuf.buffer);
+
+      // Pass 1: Opaque → opaqueColor + opaqueDepth
+      {
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: this.opaqueColorTex!.createView(),
+            clearValue: { r: 0.53, g: 0.81, b: 0.92, a: 1.0 },
+            loadOp: "clear",
+            storeOp: "store",
+          }],
+          depthStencilAttachment: {
+            view: this.opaqueDepthTex!.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        pass.setPipeline(this.opaquePipeline);
+        pass.setBindGroup(0, this.sharedBindGroup);
+        pass.setVertexBuffer(0, this.opaqueVertexBuffer);
+        pass.setIndexBuffer(this.opaqueIndexBuffer, "uint32");
+        if (this.opaqueIndexCount > 0) {
+          pass.drawIndexed(this.opaqueIndexCount);
+        }
+        pass.end();
+      }
+
+      // Pass 2: Water → waterColor + waterDepth
+      {
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: this.waterColorTex!.createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: "clear",
+            storeOp: "store",
+          }],
+          depthStencilAttachment: {
+            view: this.waterDepthTex!.createView(),
+            depthClearValue: 1.0,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        pass.setPipeline(this.waterPipeline);
+        pass.setBindGroup(0, this.sharedBindGroup);
+        pass.setBindGroup(1, this.waterPassBindGroup!);
+        pass.setVertexBuffer(0, this.transparentVertexBuffer);
+        pass.setIndexBuffer(this.transparentIndexBuffer, "uint32");
+        if (this.transparentIndexCount > 0) {
+          pass.drawIndexed(this.transparentIndexCount);
+        }
+        pass.end();
+      }
+
+      // Pass 3: Composite → swapchain
+      {
+        const pass = commandEncoder.beginRenderPass({
+          colorAttachments: [{
+            view: context.getCurrentTexture().createView(),
+            loadOp: "clear",
+            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+            storeOp: "store",
+          }],
+        });
+        pass.setPipeline(this.compositePipeline);
+        pass.setBindGroup(0, this.compositeBindGroup!);
+        pass.draw(3);
+        pass.end();
+      }
     }
 
     this.device.queue.submit([commandEncoder.finish()]);

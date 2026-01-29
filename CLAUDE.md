@@ -22,6 +22,7 @@ Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; 
 - Camera defaults: height 60, distance 120, distances [80, 120, 200]
 - `render()` delegates to `Renderer.render()`, then updates the debug overlay
 - F2 toggles the debug overlay (a DOM div, styled in `index.html`)
+- F3 toggles wireframe rendering mode
 - `destroy()` -- cancels rAF, removes listeners, destroys input and renderer
 - Handles window resize and DPR changes (forwards resize to renderer)
 
@@ -60,9 +61,11 @@ Procedural world generation. Height map from smooth-unioned SDF circles with ero
 
 ### `src/worldmesh.ts` -- `WorldMesh`
 
-Converts `World` into GPU-ready mesh data. Two meshes: opaque and transparent. Face culling: skips faces between adjacent opaque blocks or adjacent water blocks.
+Converts `World` into GPU-ready mesh data using greedy meshing. Two meshes: opaque and transparent. Face culling: skips faces between adjacent opaque blocks or adjacent water blocks.
 
-Vertex format: 7 floats (28 bytes) — position(3) + normal(3) + materialIndex(1). No UVs (computed in shader from worldPos + normal).
+**Greedy meshing:** For each of 6 face directions, iterates slices along that axis. Each slice builds a 2D grid of exposed-face materials, then greedily merges adjacent same-material faces into maximal rectangles. This reduces large flat surfaces from N quads to 1. Winding order is determined by cross-product check against the face normal.
+
+Vertex format: 7 floats (28 bytes) — position(3) + normal(3) + materialIndex(1). No UVs (computed in shader from worldPos + normal). Public API unchanged.
 
 - `VERTEX_FLOATS = 7`
 - `buildWorldMesh(world)` → `WorldMesh { opaqueVertices, opaqueIndices, transparentVertices, transparentIndices }`
@@ -94,7 +97,9 @@ Methods:
 - Group 1 (water pass): opaqueDepth (recreated on resize)
 - Group 0 (composite): compositeUniforms (near/far) + all 4 offscreen textures (recreated on resize)
 
-Shaders: 3 separate WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER). Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), near 0.1, far 500.
+Shaders: 4 WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER, WIREFRAME_SHADER). Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), near 0.1, far 500.
+
+**Wireframe mode:** When `wireframe` flag is true, skips the 3-pass pipeline. Two passes: (1) Depth pre-pass renders solid triangles (both opaque + transparent) with color writes off to populate depth buffer, clears color to white. (2) Wireframe pass loads existing depth, draws back lines (depthCompare greater, alpha 0.3 black) then front lines (depthCompare less-equal, solid black). Neither wireframe pass writes depth. Wireframe index buffers convert each quad's 6 triangle indices into 8 line indices (4 edges).
 
 ### `src/input.ts` -- `Input`, `Action`
 
