@@ -69,16 +69,32 @@ Vertex format: 7 floats (28 bytes) — position(3) + normal(3) + materialIndex(1
 
 ### `src/renderer.ts` -- `Renderer`
 
-Owns all WebGPU rendering state. Two render pipelines (opaque + transparent), `texture_2d_array` for material textures, depth buffer.
+Owns all WebGPU rendering state. 3-pass depth-peeling renderer for water transparency. Uses `depth32float` format (required for sampling depth as texture).
 
 Constructor: `new Renderer(device, format, mesh: WorldMesh)`.
 
 Methods:
 - `destroy()` -- destroys all GPU buffers and textures
-- `resize(w, h)` -- recreate depth texture
-- `render(context, camera: { yaw, height, distance }, aspect)` -- encode and submit a frame
+- `resize(w, h)` -- recreate 4 offscreen textures + rebuild bind groups
+- `render(context, camera: { yaw, height, distance }, aspect)` -- encode and submit 3 render passes
 
-Opaque pipeline: backface culling, depth write on. Transparent pipeline: alpha blending (src-alpha), no backface culling, depth write off. Fragment shader computes UVs from world position projected onto face normal plane. Water rendered at alpha 0.5. Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), far plane 500.
+**3-pass pipeline:**
+1. **Opaque pass** → renders opaque geometry to offscreen `opaqueColor` + `opaqueDepth`
+2. **Water pass** → renders water to `waterColor` + `waterDepth`, with manual depth test against `opaqueDepth` (discards fragments behind opaque geometry). Depth write ON, cull none.
+3. **Composite pass** → fullscreen triangle (no vertex buffer). Samples all 4 textures, linearizes depths, computes water thickness, blends with depth-dependent tint and alpha.
+
+**Offscreen textures** (created in `resize()`):
+- `opaqueColor` — canvas format, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `opaqueDepth` — depth32float, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `waterColor` — canvas format, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `waterDepth` — depth32float, RENDER_ATTACHMENT + TEXTURE_BINDING
+
+**Bind groups:**
+- Group 0 (shared, opaque+water): uniforms + material sampler + material texture array
+- Group 1 (water pass): opaqueDepth (recreated on resize)
+- Group 0 (composite): compositeUniforms (near/far) + all 4 offscreen textures (recreated on resize)
+
+Shaders: 3 separate WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER). Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), near 0.1, far 500.
 
 ### `src/input.ts` -- `Input`, `Action`
 
