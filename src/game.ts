@@ -1,3 +1,4 @@
+import { Renderer } from "./renderer";
 import { Timing } from "./timing";
 
 export class Game {
@@ -10,6 +11,7 @@ export class Game {
 
   private timing = new Timing();
   private debugOverlay = document.getElementById("debug-overlay")!;
+  private renderer: Renderer;
 
   // Use Game.create() to construct.
   private constructor(
@@ -22,6 +24,7 @@ export class Game {
     this.device = device;
     this.context = context;
     this.format = format;
+    this.renderer = new Renderer(device, format);
   }
 
   static async create(canvas: HTMLCanvasElement): Promise<Game> {
@@ -72,6 +75,7 @@ export class Game {
       this.backingHeight = h;
       this.canvas.width = w;
       this.canvas.height = h;
+      this.renderer.resize(w, h);
       console.log(`Backing surface resized: ${w}x${h} (DPR: ${dpr})`);
     }
   }
@@ -97,19 +101,8 @@ export class Game {
   }
 
   private render() {
-    const commandEncoder = this.device.createCommandEncoder();
-    const textureView = this.context.getCurrentTexture().createView();
-    const pass = commandEncoder.beginRenderPass({
-      colorAttachments: [{
-        view: textureView,
-        clearValue: { r: 0.05, g: 0.0, b: 0.1, a: 1.0 },
-        loadOp: "clear",
-        storeOp: "store",
-      }],
-    });
-    pass.end();
-    this.device.queue.submit([commandEncoder.finish()]);
-
+    const aspect = this.backingWidth / this.backingHeight || 1;
+    this.renderer.render(this.context, this.timing.totalTime, aspect);
     this.renderDebugOverlay();
   }
 
