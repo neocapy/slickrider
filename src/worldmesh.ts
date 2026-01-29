@@ -48,6 +48,9 @@ function shouldEmitFace(block: Material, neighbor: Material): boolean {
   // Don't render faces between two water blocks
   if (block === Material.Water && neighbor === Material.Water) return false;
 
+  // Water only renders faces against air (including out-of-bounds)
+  if (block === Material.Water && neighbor !== Material.Air) return false;
+
   // Render faces adjacent to air or transparent neighbors
   return true;
 }
