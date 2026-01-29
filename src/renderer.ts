@@ -112,7 +112,7 @@ export class Renderer {
     const bindGroupLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "non-filtering" } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
       ],
     });
@@ -161,7 +161,7 @@ export class Renderer {
           },
         }],
       },
-      primitive: { topology: "triangle-list", cullMode: "back" },
+      primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: this.depthFormat, depthWriteEnabled: false, depthCompare: "less" },
     });
 
@@ -184,6 +184,15 @@ export class Renderer {
       this.device.queue.writeBuffer(buf, 0, data.buffer, data.byteOffset, data.byteLength);
     }
     return buf;
+  }
+
+  destroy(): void {
+    this.uniformBuffer.destroy();
+    this.opaqueVertexBuffer.destroy();
+    this.opaqueIndexBuffer.destroy();
+    this.transparentVertexBuffer.destroy();
+    this.transparentIndexBuffer.destroy();
+    if (this.depthTexture) this.depthTexture.destroy();
   }
 
   resize(w: number, h: number) {

@@ -22,6 +22,7 @@ Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; 
 - Camera defaults: height 60, distance 120, distances [80, 120, 200]
 - `render()` delegates to `Renderer.render()`, then updates the debug overlay
 - F2 toggles the debug overlay (a DOM div, styled in `index.html`)
+- `destroy()` -- cancels rAF, removes listeners, destroys input and renderer
 - Handles window resize and DPR changes (forwards resize to renderer)
 
 ### `src/math.ts` -- Vec3, mat4 helpers
@@ -30,7 +31,7 @@ Column-major mat4 and Vec3 utilities for WebGPU (depth [0,1], column-major layou
 
 Exports:
 - `Vec3` type (3-tuple)
-- `vec3Sub`, `vec3Cross`, `vec3Dot`, `vec3Normalize`
+- `vec3Add`, `vec3Sub`, `vec3Scale`, `vec3Length`, `vec3Lerp`, `vec3Cross`, `vec3Dot`, `vec3Normalize`
 - `mat4Identity()`, `mat4Perspective(fovY, aspect, near, far)`, `mat4LookAt(eye, target, up)`, `mat4Multiply(a, b)`
 
 ### `src/materials.ts` -- `Material`, `MaterialInfo`
@@ -73,10 +74,11 @@ Owns all WebGPU rendering state. Two render pipelines (opaque + transparent), `t
 Constructor: `new Renderer(device, format, mesh: WorldMesh)`.
 
 Methods:
+- `destroy()` -- destroys all GPU buffers and textures
 - `resize(w, h)` -- recreate depth texture
 - `render(context, camera: { yaw, height, distance }, aspect)` -- encode and submit a frame
 
-Opaque pipeline: backface culling, depth write on. Transparent pipeline: alpha blending (src-alpha), depth write off. Fragment shader computes UVs from world position projected onto face normal plane. Water rendered at alpha 0.5. Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), far plane 500.
+Opaque pipeline: backface culling, depth write on. Transparent pipeline: alpha blending (src-alpha), no backface culling, depth write off. Fragment shader computes UVs from world position projected onto face normal plane. Water rendered at alpha 0.5. Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), far plane 500.
 
 ### `src/input.ts` -- `Input`, `Action`
 
@@ -87,6 +89,7 @@ Action enum: Up, Down, Left, Right, Jump, Pause.
 Constructor: `new Input()` — attaches keyboard listeners to `window`, gamepad connect/disconnect listeners.
 
 Methods:
+- `destroy()` -- removes all window event listeners
 - `update()` -- call once per frame. Snapshots previous state, rebuilds current from keyboard + gamepad polling.
 - `value(action)` -- raw float 0.0–1.0
 - `isPressed(action)` -- value >= 0.5

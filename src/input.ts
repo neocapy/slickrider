@@ -43,6 +43,13 @@ export class Input {
     window.addEventListener("gamepaddisconnected", this.onGamepadDisconnected);
   }
 
+  destroy(): void {
+    window.removeEventListener("keydown", this.onKeyDown);
+    window.removeEventListener("keyup", this.onKeyUp);
+    window.removeEventListener("gamepadconnected", this.onGamepadConnected);
+    window.removeEventListener("gamepaddisconnected", this.onGamepadDisconnected);
+  }
+
   update(): void {
     this.previous.set(this.current);
     this.current.fill(0);

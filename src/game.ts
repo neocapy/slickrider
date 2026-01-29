@@ -18,6 +18,16 @@ export class Game {
   private debugOverlay = document.getElementById("debug-overlay")!;
   private renderer: Renderer;
 
+  private rafId = 0;
+  private boundOnResize = this.onResize.bind(this);
+  private boundOnF2 = (e: KeyboardEvent) => {
+    if (e.code === "F2") {
+      e.preventDefault();
+      const el = this.debugOverlay;
+      el.style.display = el.style.display === "none" ? "block" : "none";
+    }
+  };
+
   private cameraYaw = 0;
   private cameraHeight = 60;
   private cameraDistance = 120;
@@ -65,18 +75,12 @@ export class Game {
   }
 
   private bindEvents() {
-    window.addEventListener("resize", this.onResize.bind(this));
+    window.addEventListener("resize", this.boundOnResize);
 
     const query = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`);
     query.addEventListener("change", this.onDprChange.bind(this), { once: true });
 
-    window.addEventListener("keydown", (e) => {
-      if (e.code === "F2") {
-        e.preventDefault();
-        const el = this.debugOverlay;
-        el.style.display = el.style.display === "none" ? "block" : "none";
-      }
-    });
+    window.addEventListener("keydown", this.boundOnF2);
   }
 
   private onResize() {
@@ -100,15 +104,23 @@ export class Game {
     next.addEventListener("change", this.onDprChange.bind(this), { once: true });
   }
 
+  destroy(): void {
+    cancelAnimationFrame(this.rafId);
+    window.removeEventListener("resize", this.boundOnResize);
+    window.removeEventListener("keydown", this.boundOnF2);
+    this.input.destroy();
+    this.renderer.destroy();
+  }
+
   private start() {
     const frame = (timestamp: number) => {
       this.timing.update(timestamp);
       this.onResize();
       this.update();
       this.render();
-      requestAnimationFrame(frame);
+      this.rafId = requestAnimationFrame(frame);
     };
-    requestAnimationFrame(frame);
+    this.rafId = requestAnimationFrame(frame);
   }
 
   private update() {
