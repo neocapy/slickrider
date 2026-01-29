@@ -25,11 +25,24 @@
       text-align: center;
       padding: 2rem;
     }
+    #debug-overlay {
+      display: none;
+      position: fixed;
+      top: 8px;
+      left: 8px;
+      background: rgba(0, 0, 0, 0.8);
+      color: #fff;
+      font: 14px/1.4 monospace;
+      padding: 8px 12px;
+      pointer-events: none;
+      white-space: pre;
+    }
   </style>
 </head>
 <body>
   <canvas id="canvas"></canvas>
   <div id="error"></div>
+  <div id="debug-overlay"></div>
   <script type="module" src="/src/main.ts"></script>
 </body>
 </html>
