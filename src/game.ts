@@ -1,6 +1,9 @@
 import { Input, Action } from "./input";
 import { Renderer } from "./renderer";
 import { Timing } from "./timing";
+import { World } from "./world";
+import { generateWorld } from "./worldgen";
+import { buildWorldMesh } from "./worldmesh";
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -16,10 +19,10 @@ export class Game {
   private renderer: Renderer;
 
   private cameraYaw = 0;
-  private cameraHeight = 2.5;
-  private cameraDistance = 6;
-  private readonly DISTANCES = [6, 10, 20];
-  private cameraDistanceIndex = 0;
+  private cameraHeight = 60;
+  private cameraDistance = 120;
+  private readonly DISTANCES = [80, 120, 200];
+  private cameraDistanceIndex = 1;
 
   // Use Game.create() to construct.
   private constructor(
@@ -32,7 +35,10 @@ export class Game {
     this.device = device;
     this.context = context;
     this.format = format;
-    this.renderer = new Renderer(device, format);
+    const world = new World();
+    generateWorld(world);
+    const mesh = buildWorldMesh(world);
+    this.renderer = new Renderer(device, format, mesh);
   }
 
   static async create(canvas: HTMLCanvasElement): Promise<Game> {
@@ -110,7 +116,7 @@ export class Game {
     const dt = this.timing.dt;
 
     this.cameraYaw += (this.input.value(Action.Right) - this.input.value(Action.Left)) * 1.5 * dt;
-    this.cameraHeight += (this.input.value(Action.Up) - this.input.value(Action.Down)) * 3 * dt;
+    this.cameraHeight += (this.input.value(Action.Up) - this.input.value(Action.Down)) * 30 * dt;
 
     if (this.input.justPressed(Action.Jump)) {
       this.cameraDistanceIndex = (this.cameraDistanceIndex + 1) % this.DISTANCES.length;

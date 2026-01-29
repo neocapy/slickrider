@@ -1,9 +1,11 @@
 import {
-  Vec3, vec3Sub, vec3Cross, vec3Normalize,
+  Vec3,
   mat4Perspective, mat4LookAt, mat4Multiply,
 } from "./math";
+import { createMaterialTextureArray } from "./textures";
+import { VERTEX_FLOATS, type WorldMesh } from "./worldmesh";
 
-const VERTEX_STRIDE = 32; // bytes: 3 pos + 3 normal + 2 uv = 8 floats
+const VERTEX_STRIDE = VERTEX_FLOATS * 4; // 28 bytes
 
 const SHADER_CODE = /* wgsl */`
 struct Uniforms {
@@ -12,31 +14,46 @@ struct Uniforms {
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var texSampler: sampler;
-@group(0) @binding(2) var texBase: texture_2d<f32>;
+@group(0) @binding(2) var texBase: texture_2d_array<f32>;
 
 struct VSOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) worldPos: vec3<f32>,
   @location(1) normal: vec3<f32>,
-  @location(2) uv: vec2<f32>,
+  @location(2) materialIdx: f32,
 };
 
 @vertex fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
-  @location(2) uv: vec2<f32>,
+  @location(2) materialIdx: f32,
 ) -> VSOut {
   var o: VSOut;
   o.pos = u.viewProj * vec4<f32>(position, 1.0);
   o.worldPos = position;
   o.normal = normal;
-  o.uv = uv;
+  o.materialIdx = materialIdx;
   return o;
 }
 
 @fragment fn fs(v: VSOut) -> @location(0) vec4<f32> {
   let N = normalize(v.normal);
-  let texColor = textureSample(texBase, texSampler, v.uv).rgb;
+  let absN = abs(N);
+  // Compute UV by projecting world position onto the face plane
+  var uv: vec2<f32>;
+  if (absN.y >= absN.x && absN.y >= absN.z) {
+    // Y-facing: project onto XZ
+    uv = fract(v.worldPos.xz);
+  } else if (absN.x >= absN.z) {
+    // X-facing: project onto ZY
+    uv = fract(v.worldPos.zy);
+  } else {
+    // Z-facing: project onto XY
+    uv = fract(v.worldPos.xy);
+  }
+
+  let layer = u32(v.materialIdx + 0.5);
+  let texColor = textureSample(texBase, texSampler, uv, layer);
 
   // Two directional lights
   let sunDir = normalize(vec3<f32>(0.8, 1.0, 0.5));
@@ -54,45 +71,49 @@ struct VSOut {
   let rimColor = vec3<f32>(0.6, 0.7, 1.0) * rim * 0.4;
 
   let ambient = vec3<f32>(0.08, 0.08, 0.1);
-  let color = texColor * (ambient + diffuse) + rimColor;
-  return vec4<f32>(color, 1.0);
+  let color = texColor.rgb * (ambient + diffuse) + rimColor;
+
+  // Water (material 1) is semi-transparent
+  var alpha = texColor.a;
+  if (layer == 1u) {
+    alpha = 0.5;
+  }
+  return vec4<f32>(color, alpha);
 }
 `;
 
 export class Renderer {
   private device: GPUDevice;
-  private pipeline: GPURenderPipeline;
+  private opaquePipeline: GPURenderPipeline;
+  private transparentPipeline: GPURenderPipeline;
   private bindGroup: GPUBindGroup;
   private uniformBuffer: GPUBuffer;
-  private vertexBuffer: GPUBuffer;
-  private indexBuffer: GPUBuffer;
+  private opaqueVertexBuffer: GPUBuffer;
+  private opaqueIndexBuffer: GPUBuffer;
+  private transparentVertexBuffer: GPUBuffer;
+  private transparentIndexBuffer: GPUBuffer;
+  private opaqueIndexCount: number;
+  private transparentIndexCount: number;
   private depthTexture: GPUTexture | null = null;
   private depthFormat: GPUTextureFormat = "depth24plus";
 
-  // Draw call info: [indexCount, firstIndex, baseVertex]
-  private draws: [number, number, number][] = [];
-
-  constructor(device: GPUDevice, format: GPUTextureFormat) {
+  constructor(device: GPUDevice, format: GPUTextureFormat, mesh: WorldMesh) {
     this.device = device;
 
     const shaderModule = device.createShaderModule({ code: SHADER_CODE });
 
-    // Uniform buffer: mat4 (64 bytes) + vec3 padded to vec4 (16 bytes) = 80 bytes
-    // Align to 256 for WebGPU uniform buffer offset alignment (safe default)
     this.uniformBuffer = device.createBuffer({
       size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
-    // Test texture 16x16
-    const { texture, sampler } = this.createTestTexture();
+    const { texture, sampler } = createMaterialTextureArray(device);
 
-    // Bind group layout
     const bindGroupLayout = device.createBindGroupLayout({
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
-        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" } },
+        { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
       ],
     });
 
@@ -101,7 +122,7 @@ export class Renderer {
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer } },
         { binding: 1, resource: sampler },
-        { binding: 2, resource: texture.createView() },
+        { binding: 2, resource: texture.createView({ dimension: "2d-array" }) },
       ],
     });
 
@@ -109,51 +130,60 @@ export class Renderer {
       bindGroupLayouts: [bindGroupLayout],
     });
 
-    this.pipeline = device.createRenderPipeline({
+    const vertexBufferLayout: GPUVertexBufferLayout = {
+      arrayStride: VERTEX_STRIDE,
+      attributes: [
+        { shaderLocation: 0, offset: 0, format: "float32x3" },   // position
+        { shaderLocation: 1, offset: 12, format: "float32x3" },  // normal
+        { shaderLocation: 2, offset: 24, format: "float32" },    // materialIdx
+      ],
+    };
+
+    this.opaquePipeline = device.createRenderPipeline({
       layout: pipelineLayout,
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs",
-        buffers: [{
-          arrayStride: VERTEX_STRIDE,
-          attributes: [
-            { shaderLocation: 0, offset: 0, format: "float32x3" },  // position
-            { shaderLocation: 1, offset: 12, format: "float32x3" }, // normal
-            { shaderLocation: 2, offset: 24, format: "float32x2" }, // uv
-          ],
-        }],
-      },
+      vertex: { module: shaderModule, entryPoint: "vs", buffers: [vertexBufferLayout] },
+      fragment: { module: shaderModule, entryPoint: "fs", targets: [{ format }] },
+      primitive: { topology: "triangle-list", cullMode: "back" },
+      depthStencil: { format: this.depthFormat, depthWriteEnabled: true, depthCompare: "less" },
+    });
+
+    this.transparentPipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module: shaderModule, entryPoint: "vs", buffers: [vertexBufferLayout] },
       fragment: {
         module: shaderModule,
         entryPoint: "fs",
-        targets: [{ format }],
+        targets: [{
+          format,
+          blend: {
+            color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+            alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+          },
+        }],
       },
-      primitive: {
-        topology: "triangle-list",
-        cullMode: "none",
-      },
-      depthStencil: {
-        format: this.depthFormat,
-        depthWriteEnabled: true,
-        depthCompare: "less",
-      },
+      primitive: { topology: "triangle-list", cullMode: "back" },
+      depthStencil: { format: this.depthFormat, depthWriteEnabled: false, depthCompare: "less" },
     });
 
-    // Build geometry
-    const { vertexData, indexData, draws } = this.buildScene();
-    this.draws = draws;
+    // Upload mesh data
+    this.opaqueIndexCount = mesh.opaqueIndices.length;
+    this.transparentIndexCount = mesh.transparentIndices.length;
 
-    this.vertexBuffer = device.createBuffer({
-      size: vertexData.byteLength,
-      usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(this.vertexBuffer, 0, vertexData.buffer);
+    this.opaqueVertexBuffer = this.createAndUpload(mesh.opaqueVertices, GPUBufferUsage.VERTEX);
+    this.opaqueIndexBuffer = this.createAndUpload(mesh.opaqueIndices, GPUBufferUsage.INDEX);
+    this.transparentVertexBuffer = this.createAndUpload(mesh.transparentVertices, GPUBufferUsage.VERTEX);
+    this.transparentIndexBuffer = this.createAndUpload(mesh.transparentIndices, GPUBufferUsage.INDEX);
+  }
 
-    this.indexBuffer = device.createBuffer({
-      size: indexData.byteLength,
-      usage: GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+  private createAndUpload(data: Float32Array | Uint32Array, usage: GPUFlagsConstant): GPUBuffer {
+    const buf = this.device.createBuffer({
+      size: Math.max(data.byteLength, 4), // min 4 bytes for empty buffers
+      usage: usage | GPUBufferUsage.COPY_DST,
     });
-    device.queue.writeBuffer(this.indexBuffer, 0, indexData.buffer);
+    if (data.byteLength > 0) {
+      this.device.queue.writeBuffer(buf, 0, data.buffer, data.byteOffset, data.byteLength);
+    }
+    return buf;
   }
 
   resize(w: number, h: number) {
@@ -173,14 +203,13 @@ export class Renderer {
       camera.height,
       Math.cos(camera.yaw) * camera.distance,
     ];
-    const target: Vec3 = [0, 1.5, 0];
+    const target: Vec3 = [0, 30, 0];
 
     const fov = 60 * Math.PI / 180;
-    const proj = mat4Perspective(fov, aspect, 0.1, 100);
+    const proj = mat4Perspective(fov, aspect, 0.1, 500);
     const view = mat4LookAt(eye, target, [0, 1, 0]);
     const viewProj = mat4Multiply(proj, view);
 
-    // Upload uniforms: viewProj (64 bytes) then cameraPos (12 bytes at offset 64)
     this.device.queue.writeBuffer(this.uniformBuffer, 0, viewProj.buffer);
     const camBuf = new Float32Array([eye[0], eye[1], eye[2], 0]);
     this.device.queue.writeBuffer(this.uniformBuffer, 64, camBuf.buffer);
@@ -189,7 +218,7 @@ export class Renderer {
     const pass = commandEncoder.beginRenderPass({
       colorAttachments: [{
         view: context.getCurrentTexture().createView(),
-        clearValue: { r: 0.05, g: 0.0, b: 0.1, a: 1.0 },
+        clearValue: { r: 0.53, g: 0.81, b: 0.92, a: 1.0 },
         loadOp: "clear",
         storeOp: "store",
       }],
@@ -201,151 +230,24 @@ export class Renderer {
       },
     });
 
-    pass.setPipeline(this.pipeline);
+    // Opaque pass
+    pass.setPipeline(this.opaquePipeline);
     pass.setBindGroup(0, this.bindGroup);
-    pass.setVertexBuffer(0, this.vertexBuffer);
-    pass.setIndexBuffer(this.indexBuffer, "uint16");
+    pass.setVertexBuffer(0, this.opaqueVertexBuffer);
+    pass.setIndexBuffer(this.opaqueIndexBuffer, "uint32");
+    if (this.opaqueIndexCount > 0) {
+      pass.drawIndexed(this.opaqueIndexCount);
+    }
 
-    for (const [indexCount, firstIndex, baseVertex] of this.draws) {
-      pass.drawIndexed(indexCount, 1, firstIndex, baseVertex);
+    // Transparent pass
+    pass.setPipeline(this.transparentPipeline);
+    pass.setVertexBuffer(0, this.transparentVertexBuffer);
+    pass.setIndexBuffer(this.transparentIndexBuffer, "uint32");
+    if (this.transparentIndexCount > 0) {
+      pass.drawIndexed(this.transparentIndexCount);
     }
 
     pass.end();
     this.device.queue.submit([commandEncoder.finish()]);
   }
-
-  private createTestTexture(): { texture: GPUTexture; sampler: GPUSampler } {
-    const size = 16;
-    const data = new Uint8Array(size * size * 4);
-
-    // Two shades of slate blue for checkerboard
-    // HSL(220, 20%, 40%) ≈ RGB(82, 92, 122)
-    // HSL(220, 20%, 35%) ≈ RGB(71, 80, 107)
-    const light: [number, number, number] = [82, 92, 122];
-    const dark: [number, number, number] = [71, 80, 107];
-
-    for (let row = 0; row < size; row++) {
-      for (let col = 0; col < size; col++) {
-        const i = (row * size + col) * 4;
-        const checker = (row + col) % 2 === 0;
-        const base = checker ? light : dark;
-
-        // UV tint: red increases with U (col), green increases with V (row)
-        // Converges at top-left (0,0) = minimal tint
-        const uTint = col / 15; // 0..1
-        const vTint = row / 15; // 0..1
-
-        data[i + 0] = Math.min(255, base[0] + Math.round(uTint * 40)); // R + red tint
-        data[i + 1] = Math.min(255, base[1] + Math.round(vTint * 40)); // G + green tint
-        data[i + 2] = base[2];
-        data[i + 3] = 255;
-      }
-    }
-
-    const texture = this.device.createTexture({
-      size: [size, size],
-      format: "rgba8unorm",
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    });
-    this.device.queue.writeTexture(
-      { texture },
-      data,
-      { bytesPerRow: size * 4 },
-      [size, size],
-    );
-
-    const sampler = this.device.createSampler({
-      magFilter: "nearest",
-      minFilter: "nearest",
-    });
-
-    return { texture, sampler };
-  }
-
-  private buildScene(): {
-    vertexData: Float32Array;
-    indexData: Uint16Array;
-    draws: [number, number, number][];
-  } {
-    const verts: number[] = [];
-    const indices: number[] = [];
-    const draws: [number, number, number][] = [];
-
-    let vertexOffset = 0;
-    let indexOffset = 0;
-
-    // --- 30 Random Triangles (flat shaded) ---
-    // Use a seeded-ish approach with Math.random for reproducibility isn't needed
-    const triVertCount = 30 * 3;
-    for (let t = 0; t < 30; t++) {
-      const p0: Vec3 = [rand(-2, 2), rand(-2, 2), rand(-2, 2)];
-      const p1: Vec3 = [rand(-2, 2), rand(-2, 2), rand(-2, 2)];
-      const p2: Vec3 = [rand(-2, 2), rand(-2, 2), rand(-2, 2)];
-
-      const edge1 = vec3Sub(p1, p0);
-      const edge2 = vec3Sub(p2, p0);
-      const normal = vec3Normalize(vec3Cross(edge1, edge2));
-
-      for (const p of [p0, p1, p2]) {
-        verts.push(p[0], p[1], p[2]);
-        verts.push(normal[0], normal[1], normal[2]);
-        verts.push(Math.random(), Math.random()); // random UV
-      }
-      indices.push(vertexOffset, vertexOffset + 1, vertexOffset + 2);
-      vertexOffset += 3;
-    }
-    draws.push([triVertCount, indexOffset, 0]);
-    indexOffset += triVertCount;
-
-    // --- Cylinder (smooth shaded, no caps) ---
-    const segments = 24;
-    const cylRadius = 0.8;
-    const cylHeight = 1.5;
-    const cylY = 3.5; // hover above triangles
-    const cylBaseVertex = vertexOffset;
-
-    // 2 rings: bottom and top
-    for (let ring = 0; ring < 2; ring++) {
-      const y = cylY + (ring === 0 ? -cylHeight / 2 : cylHeight / 2);
-      for (let seg = 0; seg < segments; seg++) {
-        const theta = (seg / segments) * Math.PI * 2;
-        const x = Math.cos(theta) * cylRadius;
-        const z = Math.sin(theta) * cylRadius;
-        // Position
-        verts.push(x, y, z);
-        // Normal: radial outward (smooth — shared across rings at same angle)
-        const n = vec3Normalize([x, 0, z]);
-        verts.push(n[0], n[1], n[2]);
-        // UV: u = seg/segments, v = ring
-        verts.push(seg / segments, ring);
-      }
-    }
-    vertexOffset += segments * 2;
-
-    // Indices for cylinder quads
-    const cylIndexStart = indexOffset;
-    for (let seg = 0; seg < segments; seg++) {
-      const next = (seg + 1) % segments;
-      const bottom = cylBaseVertex + seg;
-      const top = cylBaseVertex + segments + seg;
-      const bottomNext = cylBaseVertex + next;
-      const topNext = cylBaseVertex + segments + next;
-
-      // Two triangles per quad
-      indices.push(bottom, bottomNext, top);
-      indices.push(bottomNext, topNext, top);
-      indexOffset += 6;
-    }
-    draws.push([segments * 6, cylIndexStart, 0]);
-
-    return {
-      vertexData: new Float32Array(verts),
-      indexData: new Uint16Array(indices),
-      draws,
-    };
-  }
-}
-
-function rand(min: number, max: number): number {
-  return min + Math.random() * (max - min);
 }
