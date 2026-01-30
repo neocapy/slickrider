@@ -16,7 +16,7 @@ Entry point. Grabs DOM elements, calls `Game.create()`, displays errors.
 
 Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; use `Game.create(canvas)`.
 
-- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, builds mesh via `buildSceneMesh`, passes mesh to `Renderer`
+- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates Voronoi sites, builds mesh via `buildSceneMesh`, passes mesh to `Renderer`
 - Loop: `requestAnimationFrame` -> `timing.update()` -> `onResize()` -> `update()` (includes `input.update()`) -> `render()`
 - Owns `Input` instance; `update()` polls input and adjusts camera (yaw/height/distance)
 - Camera defaults: height 60, distance 120, distances [80, 120, 200]
@@ -54,11 +54,18 @@ Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaq
 - `WorldBounds` interface: `{ sizeX, sizeY, sizeZ }` (runtime-configurable)
 - `SceneMesh` interface: `{ opaqueVertices, opaqueIndices, transparentVertices, transparentIndices }`
 - `VERTEX_FLOATS = 7`
-- `buildSceneMesh(bounds, waterHeight)` -> `SceneMesh`
+- `buildSceneMesh(bounds, waterHeight, sites?)` -> `SceneMesh` — optional `sites: Float64Array | null` adds 0.1³ Stone boxes at each site position
 
 **Frame:** 12 thin boxes (0.2m thickness) forming the edges of the world volume, positioned just outside the volume boundary. Uses `Frame` material (pitch black).
 
 **Water plane:** Single large quad at `waterHeight`, extending to +/-1024 in XZ. Uses `Water` material. Rendered as transparent geometry through the water pass.
+
+### `src/voronoi.ts` -- `SpatialGrid`, `generateVoronoiSites`
+
+Point generation with minimum-distance rejection using a spatial grid for fast neighbor lookups.
+
+- `SpatialGrid` class (not exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
+- `generateVoronoiSites(bounds, count, minDistance?)` -> `Float64Array` (flat xyz triples). Default minDistance: `cbrt(volume/count) * 0.3`. Uses rejection sampling with max `count * 20` attempts.
 
 ### `src/renderer.ts` -- `Renderer`
 

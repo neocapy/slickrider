@@ -2,6 +2,7 @@ import { Input, Action } from "./input";
 import { Renderer } from "./renderer";
 import { Timing } from "./timing";
 import { buildSceneMesh, type WorldBounds } from "./scenemesh";
+import { generateVoronoiSites } from "./voronoi";
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -54,7 +55,8 @@ export class Game {
     this.format = format;
     this.bounds = bounds;
     this.waterHeight = waterHeight;
-    const mesh = buildSceneMesh(bounds, waterHeight);
+    const sites = generateVoronoiSites(bounds, 4000);
+    const mesh = buildSceneMesh(bounds, waterHeight, sites);
     this.renderer = new Renderer(device, format, mesh);
   }
 
