@@ -92,7 +92,7 @@ Constructor: `new Renderer(device, format, mesh: SceneMesh)`.
 Methods:
 - `destroy()` -- destroys all GPU buffers and textures
 - `resize(w, h)` -- recreate 4 offscreen textures + rebuild bind groups
-- `render(context, camera: { eye: Vec3, yaw, pitch }, aspect)` -- encode and submit 3 render passes
+- `render(context, camera: { eye: Vec3, yaw, pitch }, aspect, wireframe)` -- encode and submit 3 render passes (or wireframe passes when flag is true)
 
 **3-pass pipeline:**
 1. **Opaque pass** -> renders opaque geometry to offscreen `opaqueColor` + `opaqueDepth`
