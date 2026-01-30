@@ -16,10 +16,10 @@ Entry point. Grabs DOM elements, calls `Game.create()`, displays errors.
 
 Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; use `Game.create(canvas)`.
 
-- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates Voronoi sites, computes k-NN (k=30), builds Voronoi cells, marks cells with Y < waterHeight as solid, extracts culled mesh, passes to `Renderer`
+- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates 16384 Voronoi sites, computes k-NN (k=30), builds Voronoi cells, marks cells with Y < waterHeight as solid ground (Stone), seeds ~20 floating regions in the sky via BFS flood-fill over knn adjacency (20-60 cells each, cycling Stone/Dirt/Grass/Concrete), extracts culled mesh with per-cell materials, passes to `Renderer`
 - Loop: `requestAnimationFrame` -> `timing.update()` -> `onResize()` -> `update()` (includes `input.update()`) -> `render()`
 - Owns `Input` instance; `update()` polls input for FPS camera movement and mouse look
-- FPS camera: position (x, y, z), yaw, pitch. Defaults: position (0, 40, 0), yaw 0, pitch 0
+- FPS camera: position (x, y, z), yaw, pitch. Defaults: position (0, 60, 0), yaw 0, pitch 0
 - WASD moves in XZ plane relative to yaw, Q/E for debug vertical, mouse click+drag rotates. Speed 30 units/s, sensitivity 0.003
 - `render()` delegates to `Renderer.render()`, then updates the debug overlay
 - F2 toggles the debug overlay (a DOM div, styled in `index.html`)
@@ -27,7 +27,7 @@ Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; 
 - `destroy()` -- cancels rAF, removes listeners, destroys input and renderer
 - Handles window resize and DPR changes (forwards resize to renderer)
 - Stores `bounds: WorldBounds` and `waterHeight: number` as instance fields (runtime-configurable)
-- Default bounds: sizeX=64, sizeY=128, sizeZ=64. Default waterHeight=16.
+- Default bounds: sizeX=256, sizeY=128, sizeZ=96. Default waterHeight=16.
 
 ### `src/math.ts` -- Vec3, mat4 helpers
 
@@ -80,7 +80,7 @@ Point generation with minimum-distance rejection and k-nearest-neighbor search, 
   - `extractFaces()` — returns `{ vertices, neighbor, planeIdx }[]` with vertices ordered by angle
   - `neighborOf: Int32Array` — per-plane: site index that produced it (-1 = bounding box)
 - `buildVoronoiCells(sites, knn, k, xMin, xMax, yMin, yMax, zMin, zMax)` -> `ConvexCell[]` — builds all cells by clipping each site's cell against its k-NN bisector planes
-- `extractVoronoiMesh(cells, solid, material)` -> `{ vertices, indices }` — extracts renderable mesh with internal face culling. Only emits faces where `solid[i] != solid[neighbor]`. Boundary faces (neighbor = -1) only render if cell is solid.
+- `extractVoronoiMesh(cells, solid, material: number | Uint8Array)` -> `{ vertices, indices }` — extracts renderable mesh with internal face culling. Only emits faces where `solid[i] != solid[neighbor]`. Boundary faces (neighbor = -1) only render if cell is solid. Material can be a single value or per-cell array.
 
 ### `src/renderer.ts` -- `Renderer`
 

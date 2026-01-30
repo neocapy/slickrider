@@ -392,7 +392,7 @@ export function buildVoronoiCells(
 export function extractVoronoiMesh(
   cells: ConvexCell[],
   solid: boolean[],
-  material: number,
+  material: number | Uint8Array,
 ): { vertices: Float32Array; indices: Uint32Array } {
   const verts: number[] = [];
   const idxs: number[] = [];
@@ -431,7 +431,8 @@ export function extractVoronoiMesh(
       // Fan triangulate the face (reversed winding for outward-facing)
       const baseVert = vertCount;
       for (const v of faceVerts) {
-        verts.push(v[0], v[1], v[2], nx, ny, nz, material);
+        const mat = typeof material === "number" ? material : material[ci];
+        verts.push(v[0], v[1], v[2], nx, ny, nz, mat);
         vertCount++;
       }
       for (let fi = 1; fi < faceVerts.length - 1; fi++) {

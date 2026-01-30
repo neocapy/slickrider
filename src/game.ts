@@ -34,7 +34,7 @@ export class Game {
   };
 
   private cameraX = 0;
-  private cameraY = 40;
+  private cameraY = 60;
   private cameraZ = 0;
   private cameraYaw = 0;
   private cameraPitch = 0;
@@ -57,7 +57,7 @@ export class Game {
     this.format = format;
     this.bounds = bounds;
     this.waterHeight = waterHeight;
-    const sites = generateVoronoiSites(bounds, 4000);
+    const sites = generateVoronoiSites(bounds, 16384);
     const k = 30;
     const knn = computeKNN(sites, bounds, k);
     const siteCount = sites.length / 3;
@@ -71,14 +71,60 @@ export class Game {
       -halfX, halfX, 0, bounds.sizeY, -halfZ, halfZ,
     );
 
-    // Mark bottom half of cells as solid (simple test: site Y < waterHeight)
+    // Mark cells below water as solid ground
     const solid = new Array<boolean>(siteCount);
+    const material = new Uint8Array(siteCount);
     for (let i = 0; i < siteCount; i++) {
-      solid[i] = sites[i * 3 + 1] < waterHeight;
+      const sy = sites[i * 3 + 1];
+      if (sy < waterHeight) {
+        solid[i] = true;
+        material[i] = Material.Stone;
+      }
     }
 
-    // Extract mesh with internal face culling
-    const voronoiMesh = extractVoronoiMesh(cells, solid, Material.Stone);
+    // Seed ~20 floating regions in the sky and flood-fill via knn adjacency
+    const skyMaterials = [Material.Stone, Material.Dirt, Material.Grass, Material.Concrete];
+    const rng = (seed: number) => {
+      let s = seed;
+      return () => { s = (s * 1664525 + 1013904223) & 0x7fffffff; return s / 0x7fffffff; };
+    };
+    const rand = rng(42);
+
+    // Collect candidate sky cells (above water + margin)
+    const skyCells: number[] = [];
+    for (let i = 0; i < siteCount; i++) {
+      if (sites[i * 3 + 1] > waterHeight + 10) skyCells.push(i);
+    }
+
+    for (let region = 0; region < 20; region++) {
+      const seed = skyCells[Math.floor(rand() * skyCells.length)];
+      if (solid[seed]) continue;
+      const mat = skyMaterials[region % skyMaterials.length];
+      const regionSize = 20 + Math.floor(rand() * 40); // 20-60 cells per region
+
+      // BFS flood-fill using knn neighbors
+      const queue = [seed];
+      const visited = new Set<number>([seed]);
+      let filled = 0;
+      while (queue.length > 0 && filled < regionSize) {
+        const cur = queue.shift()!;
+        if (solid[cur]) continue;
+        solid[cur] = true;
+        material[cur] = mat;
+        filled++;
+        // Add knn neighbors
+        for (let n = 0; n < k; n++) {
+          const nb = knn[cur * k + n];
+          if (!visited.has(nb) && !solid[nb]) {
+            visited.add(nb);
+            queue.push(nb);
+          }
+        }
+      }
+    }
+
+    // Extract mesh — use per-cell material
+    const voronoiMesh = extractVoronoiMesh(cells, solid, material);
     console.log(`Voronoi mesh: ${voronoiMesh.vertices.length / 7} verts, ${voronoiMesh.indices.length / 3} tris`);
 
     const mesh = buildSceneMesh(bounds, waterHeight, null, null, voronoiMesh);
@@ -101,7 +147,7 @@ export class Game {
 
     context.configure({ device, format, alphaMode: "opaque" });
 
-    const bounds: WorldBounds = { sizeX: 64, sizeY: 128, sizeZ: 64 };
+    const bounds: WorldBounds = { sizeX: 256, sizeY: 128, sizeZ: 96 };
     const waterHeight = 16;
 
     const game = new Game(canvas, device, context, format, bounds, waterHeight);
