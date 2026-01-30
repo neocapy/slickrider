@@ -41,11 +41,11 @@ struct VSOut {
   let absN = abs(N);
   var uv: vec2<f32>;
   if (absN.y >= absN.x && absN.y >= absN.z) {
-    uv = fract(v.worldPos.xz);
+    uv = fract(v.worldPos.xz * 0.25);
   } else if (absN.x >= absN.z) {
-    uv = fract(v.worldPos.zy);
+    uv = fract(v.worldPos.zy * 0.25);
   } else {
-    uv = fract(v.worldPos.xy);
+    uv = fract(v.worldPos.xy * 0.25);
   }
 
   let layer = u32(v.materialIdx + 0.5);
@@ -115,11 +115,11 @@ struct VSOut {
   let absN = abs(N);
   var uv: vec2<f32>;
   if (absN.y >= absN.x && absN.y >= absN.z) {
-    uv = fract(v.worldPos.xz);
+    uv = fract(v.worldPos.xz * 0.25);
   } else if (absN.x >= absN.z) {
-    uv = fract(v.worldPos.zy);
+    uv = fract(v.worldPos.zy * 0.25);
   } else {
-    uv = fract(v.worldPos.xy);
+    uv = fract(v.worldPos.xy * 0.25);
   }
 
   let layer = u32(v.materialIdx + 0.5);

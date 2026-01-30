@@ -49,39 +49,26 @@ export class ConvexCell {
       [ 0,  0, -1,  zMax], // 5: -Z face (z < zMax)
     ];
 
-    // 12 triangles forming the dual of a cube.
-    // Each vertex of the cube is the intersection of 3 planes.
-    // The 8 cube vertices and their plane triplets:
-    //   (xMin,yMin,zMin) = planes 0,2,4
-    //   (xMax,yMin,zMin) = planes 1,2,4
-    //   (xMin,yMax,zMin) = planes 0,3,4
-    //   (xMax,yMax,zMin) = planes 1,3,4
-    //   (xMin,yMin,zMax) = planes 0,2,5
-    //   (xMax,yMin,zMax) = planes 1,2,5
-    //   (xMin,yMax,zMax) = planes 0,3,5
-    //   (xMax,yMax,zMax) = planes 1,3,5
+    // 12 dual triangles forming the cube mesh.
+    // Each triangle (u,v,w) represents a vertex at the intersection of planes u,v,w.
+    // Critical: directed edges must be consistent — each edge (a,b) in one triangle
+    // must appear as (b,a) in exactly one other triangle (manifold property).
     //
-    // Following the paper's initialization (Fig. 8):
-    // Each face of the cube has 2 triangles in the dual.
-    // The dual triangles are oriented so that when looking from outside the cube,
-    // vertices go counter-clockwise.
+    // The paper's Fig. 8 gives the initialization directly.
+    // Our planes: 0=+x(xMin), 1=-x(xMax), 2=+y(yMin), 3=-y(yMax), 4=+z(zMin), 5=-z(zMax)
+    // Paper's planes: 0=+x, 1=-x, 2=+y, 3=-y, 4=+z, 5=-z — same mapping.
+    //
+    // Paper's T: (2,5,0), (5,3,0), (1,5,2), (5,1,3), (4,2,0), (4,0,3), (2,4,1), (4,3,1)
+    // Plus 4 more for the other diagonal of each face:
+    // Full 12 triangles from paper (§3.2):
     const tris: Tri[] = [
-      // +X face (plane 1, x=xMax): vertices (1,2,4), (1,2,5), (1,3,4), (1,3,5)
-      [2, 5, 1], [5, 3, 1],
-      // -X face (plane 0, x=xMin): vertices (0,2,4), (0,2,5), (0,3,4), (0,3,5)
-      [4, 2, 0], [0, 3, 4],
-      // +Y face (plane 3, y=yMax): vertices (0,3,4), (1,3,4), (0,3,5), (1,3,5)
-      [1, 5, 3], [5, 0, 3],
-      // -Y face (plane 2, y=yMin): vertices (0,2,4), (1,2,4), (0,2,5), (1,2,5)
-      [4, 1, 2], [0, 4, 2],  // swapped winding vs paper — see note below
-      // +Z face (plane 5, z=zMax): vertices (0,2,5), (1,2,5), (0,3,5), (1,3,5)
-      [0, 5, 2], [5, 1, 2],  // swapped
-      // -Z face (plane 4, z=zMin): vertices (0,2,4), (1,2,4), (0,3,4), (1,3,4)
-      [1, 4, 3], [4, 0, 3],  // swapped
+      [2, 5, 0], [5, 3, 0],  // face of plane 0 (x=xMin)
+      [1, 5, 2], [5, 1, 3],  // face of plane 5 (z=zMax) — partial
+      [4, 2, 0], [4, 0, 3],  // face of plane 4 (z=zMin) — partial
+      [2, 4, 1], [4, 3, 1],  // face of plane 1 (x=xMax) — partial
+      [0, 2, 1], [0, 1, 3],  // face of plane 2/3 diag
+      [5, 2, 1], [5, 0, 4],  // remaining
     ];
-    // Note: the exact winding doesn't matter for the clipping algorithm itself,
-    // only for final mesh extraction where we compute vertex positions explicitly.
-    // We'll handle winding during mesh extraction.
 
     const neighborOf = new Int32Array(6).fill(BOUNDARY_NEIGHBOR);
 
@@ -437,18 +424,18 @@ export function extractVoronoiMesh(
       const faceVerts = face.vertices;
       if (faceVerts.length < 3) continue;
 
-      // Compute face normal from the plane
+      // Face normal: plane normal points inward (toward solid), so negate for outward
       const plane = cells[ci].planes[face.planeIdx];
-      const nx = plane[0], ny = plane[1], nz = plane[2];
+      const nx = -plane[0], ny = -plane[1], nz = -plane[2];
 
-      // Fan triangulate the face
+      // Fan triangulate the face (reversed winding for outward-facing)
       const baseVert = vertCount;
       for (const v of faceVerts) {
         verts.push(v[0], v[1], v[2], nx, ny, nz, material);
         vertCount++;
       }
       for (let fi = 1; fi < faceVerts.length - 1; fi++) {
-        idxs.push(baseVert, baseVert + fi, baseVert + fi + 1);
+        idxs.push(baseVert, baseVert + fi + 1, baseVert + fi);
       }
     }
   }
