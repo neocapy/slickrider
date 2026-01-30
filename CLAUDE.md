@@ -65,7 +65,7 @@ Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaq
 
 Point generation with minimum-distance rejection and k-nearest-neighbor search, both using a spatial grid.
 
-- `SpatialGrid` class (not exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. `side` field is readonly. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
+- `SpatialGrid` class (exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. `side` field is readonly. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
 - `generateVoronoiSites(bounds, count, minDistance?)` -> `Float64Array` (flat xyz triples). Default minDistance: `cbrt(volume/count) * 0.3`. Uses rejection sampling with max `count * 20` attempts.
 - `computeKNN(sites, bounds, k)` -> `Uint32Array` (flat `n × k`). For site `i`, neighbors at `i*k .. i*k+k-1`, sorted nearest-first. Uses expanding-radius grid queries with max-heap replacement.
 
@@ -77,9 +77,10 @@ Point generation with minimum-distance rejection and k-nearest-neighbor search, 
   - `ConvexCell.fromBoundingBox(xMin, xMax, yMin, yMax, zMin, zMax)` — creates cell with 6 planes, 12 dual triangles
   - `clipByPlane(plane, neighborIdx)` — clips cell by half-space, tracks which neighbor produced each plane. Returns false if degenerate.
   - `vertexPosition(triIdx)` — computes 3D point from 3-plane intersection
+  - `securityRadius(sx, sy, sz)` — max distance from point to any vertex; if a candidate neighbor is farther than 2× this, it cannot clip the cell
   - `extractFaces()` — returns `{ vertices, neighbor, planeIdx }[]` with vertices ordered by angle
   - `neighborOf: Int32Array` — per-plane: site index that produced it (-1 = bounding box)
-- `buildVoronoiCells(sites, knn, k, xMin, xMax, yMin, yMax, zMin, zMax)` -> `ConvexCell[]` — builds all cells by clipping each site's cell against its k-NN bisector planes
+- `buildVoronoiCells(sites, knn, k, bounds, xMin, xMax, yMin, yMax, zMin, zMax)` -> `ConvexCell[]` — builds all cells with interleaved security radius check. Phase 1: clips knn neighbors nearest-first, rechecking security radius every 4 clips for early-out. Phase 2: if not proven secure, queries spatial grid within 2×radius for missing neighbors. Guarantees all true Voronoi neighbors are clipped.
 - `extractVoronoiMesh(cells, solid, material: number | Uint8Array)` -> `{ vertices, indices }` — extracts renderable mesh with internal face culling. Only emits faces where `solid[i] != solid[neighbor]`. Boundary faces (neighbor = -1) only render if cell is solid. Material can be a single value or per-cell array.
 
 ### `src/renderer.ts` -- `Renderer`
