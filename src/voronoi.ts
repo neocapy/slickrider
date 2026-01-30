@@ -5,7 +5,7 @@ class SpatialGrid {
   private nx: number;
   private ny: number;
   private nz: number;
-  private side: number;
+  readonly side: number;
   private halfX: number;
   private halfZ: number;
   private buckets: number[][];
@@ -108,4 +108,91 @@ export function generateVoronoiSites(
 
   console.log(`Voronoi: accepted ${accepted}/${count} sites (${totalAttempts - accepted} rejected)`);
   return accepted === count ? points : points.slice(0, accepted * 3);
+}
+
+export function computeKNN(
+  sites: Float64Array,
+  bounds: WorldBounds,
+  k: number,
+): Uint32Array {
+  const t0 = performance.now();
+  const n = sites.length / 3;
+  const grid = new SpatialGrid(bounds, 1000);
+
+  // Populate grid with all sites
+  for (let i = 0; i < n; i++) {
+    const j = i * 3;
+    grid.insert([sites[j], sites[j + 1], sites[j + 2]], i);
+  }
+
+  const result = new Uint32Array(n * k);
+
+  // Per-query reusable buffers
+  const dists = new Float64Array(k);
+  const indices = new Uint32Array(k);
+
+  for (let qi = 0; qi < n; qi++) {
+    const qx = sites[qi * 3];
+    const qy = sites[qi * 3 + 1];
+    const qz = sites[qi * 3 + 2];
+
+    let found = 0;
+    let maxDist = 0; // distance of the farthest in our k candidates
+    let maxIdx = 0;  // index within candidates of the farthest
+
+    // Expand search radius until we have k neighbors
+    // Start with grid side length, double each time
+    let radius = grid.side;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const nearby = grid.nearbyIndices([qx, qy, qz], radius);
+
+      found = 0;
+      maxDist = 0;
+      maxIdx = 0;
+
+      for (let ni = 0; ni < nearby.length; ni++) {
+        const si = nearby[ni];
+        if (si === qi) continue; // skip self
+
+        const sj = si * 3;
+        const dx = sites[sj] - qx;
+        const dy = sites[sj + 1] - qy;
+        const dz = sites[sj + 2] - qz;
+        const d2 = dx * dx + dy * dy + dz * dz;
+
+        if (found < k) {
+          dists[found] = d2;
+          indices[found] = si;
+          if (d2 > maxDist) { maxDist = d2; maxIdx = found; }
+          found++;
+        } else if (d2 < maxDist) {
+          dists[maxIdx] = d2;
+          indices[maxIdx] = si;
+          // Recompute max
+          maxDist = 0;
+          maxIdx = 0;
+          for (let m = 0; m < k; m++) {
+            if (dists[m] > maxDist) { maxDist = dists[m]; maxIdx = m; }
+          }
+        }
+      }
+
+      if (found >= k) break;
+      radius *= 2;
+    }
+
+    // Sort candidates by distance (nearest first)
+    const pairs: { d: number; i: number }[] = [];
+    for (let m = 0; m < found; m++) pairs.push({ d: dists[m], i: indices[m] });
+    pairs.sort((a, b) => a.d - b.d);
+
+    const offset = qi * k;
+    for (let m = 0; m < k; m++) {
+      result[offset + m] = m < pairs.length ? pairs[m].i : qi; // fallback to self if not enough
+    }
+  }
+
+  const elapsed = performance.now() - t0;
+  console.log(`k-NN: computed ${k} neighbors for ${n} sites in ${elapsed.toFixed(1)}ms`);
+  return result;
 }

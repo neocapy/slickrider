@@ -54,18 +54,19 @@ Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaq
 - `WorldBounds` interface: `{ sizeX, sizeY, sizeZ }` (runtime-configurable)
 - `SceneMesh` interface: `{ opaqueVertices, opaqueIndices, transparentVertices, transparentIndices }`
 - `VERTEX_FLOATS = 7`
-- `buildSceneMesh(bounds, waterHeight, sites?)` -> `SceneMesh` — optional `sites: Float64Array | null` adds 0.1³ Stone boxes at each site position
+- `buildSceneMesh(bounds, waterHeight, sites?, siteColors?)` -> `SceneMesh` — optional `sites: Float64Array | null` adds 0.3³ boxes at each site position, colored by `siteColors: Uint8Array | null` (per-site material index, defaults to Stone)
 
 **Frame:** 12 thin boxes (0.2m thickness) forming the edges of the world volume, positioned just outside the volume boundary. Uses `Frame` material (pitch black).
 
 **Water plane:** Single large quad at `waterHeight`, extending to +/-1024 in XZ. Uses `Water` material. Rendered as transparent geometry through the water pass.
 
-### `src/voronoi.ts` -- `SpatialGrid`, `generateVoronoiSites`
+### `src/voronoi.ts` -- `SpatialGrid`, `generateVoronoiSites`, `computeKNN`
 
-Point generation with minimum-distance rejection using a spatial grid for fast neighbor lookups.
+Point generation with minimum-distance rejection and k-nearest-neighbor search, both using a spatial grid.
 
-- `SpatialGrid` class (not exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
+- `SpatialGrid` class (not exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. `side` field is readonly. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
 - `generateVoronoiSites(bounds, count, minDistance?)` -> `Float64Array` (flat xyz triples). Default minDistance: `cbrt(volume/count) * 0.3`. Uses rejection sampling with max `count * 20` attempts.
+- `computeKNN(sites, bounds, k)` -> `Uint32Array` (flat `n × k`). For site `i`, neighbors at `i*k .. i*k+k-1`, sorted nearest-first. Uses expanding-radius grid queries with max-heap replacement.
 
 ### `src/renderer.ts` -- `Renderer`
 

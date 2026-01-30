@@ -47,7 +47,7 @@ function pushBox(
   pushQuad(verts, idxs, base, x1,y0,z0, x0,y0,z0, x0,y1,z0, x1,y1,z0,  0, 0,-1, mat); // -Z
 }
 
-export function buildSceneMesh(bounds: WorldBounds, waterHeight: number, sites: Float64Array | null = null): SceneMesh {
+export function buildSceneMesh(bounds: WorldBounds, waterHeight: number, sites: Float64Array | null = null, siteColors: Uint8Array | null = null): SceneMesh {
   const halfX = bounds.sizeX / 2;
   const halfZ = bounds.sizeZ / 2;
   const h = bounds.sizeY;
@@ -89,13 +89,14 @@ export function buildSceneMesh(bounds: WorldBounds, waterHeight: number, sites: 
   pushBox(oVerts, oIdxs, base, xMax, yMin - t, zMin, xMax + t, yMin, zMax, mat);
   pushBox(oVerts, oIdxs, base, xMin - t, yMin - t, zMin, xMin, yMin, zMax, mat);
 
-  // Voronoi site visualization — tiny boxes
+  // Voronoi site visualization — small boxes
   if (sites) {
-    const s = 0.05; // half-size of 0.1³ box
-    const siteMat = Material.Stone;
+    const s = 0.15; // half-size of 0.3³ box
     for (let i = 0; i < sites.length; i += 3) {
+      const si = i / 3;
+      const m = siteColors ? siteColors[si] : Material.Stone;
       const x = sites[i], y = sites[i + 1], z = sites[i + 2];
-      pushBox(oVerts, oIdxs, base, x - s, y - s, z - s, x + s, y + s, z + s, siteMat);
+      pushBox(oVerts, oIdxs, base, x - s, y - s, z - s, x + s, y + s, z + s, m);
     }
   }
 
