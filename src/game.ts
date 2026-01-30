@@ -33,11 +33,11 @@ export class Game {
     }
   };
 
+  private cameraX = 0;
+  private cameraY = 40;
+  private cameraZ = 0;
   private cameraYaw = 0;
-  private cameraHeight = 60;
-  private cameraDistance = 120;
-  private readonly DISTANCES = [80, 120, 200];
-  private cameraDistanceIndex = 1;
+  private cameraPitch = 0;
 
   private bounds: WorldBounds;
   private waterHeight: number;
@@ -164,21 +164,34 @@ export class Game {
     this.input.update();
     const dt = this.timing.dt;
 
-    this.cameraYaw += (this.input.value(Action.Right) - this.input.value(Action.Left)) * 1.5 * dt;
-    this.cameraHeight += (this.input.value(Action.Up) - this.input.value(Action.Down)) * 30 * dt;
+    // Mouse look
+    const MOUSE_SENSITIVITY = 0.003;
+    const [mdx, mdy] = this.input.mouseDelta();
+    this.cameraYaw -= mdx * MOUSE_SENSITIVITY;
+    this.cameraPitch -= mdy * MOUSE_SENSITIVITY;
+    const MAX_PITCH = (89 * Math.PI) / 180;
+    this.cameraPitch = Math.max(-MAX_PITCH, Math.min(MAX_PITCH, this.cameraPitch));
 
-    if (this.input.justPressed(Action.Jump)) {
-      this.cameraDistanceIndex = (this.cameraDistanceIndex + 1) % this.DISTANCES.length;
-      this.cameraDistance = this.DISTANCES[this.cameraDistanceIndex];
-    }
+    // Movement
+    const MOVE_SPEED = 30;
+    const forward = this.input.value(Action.Up) - this.input.value(Action.Down);
+    const strafe = this.input.value(Action.Right) - this.input.value(Action.Left);
+    const vertical = this.input.value(Action.DebugMoveUp) - this.input.value(Action.DebugMoveDown);
+
+    const sinYaw = Math.sin(this.cameraYaw);
+    const cosYaw = Math.cos(this.cameraYaw);
+
+    this.cameraX += (-sinYaw * forward + cosYaw * strafe) * MOVE_SPEED * dt;
+    this.cameraZ += (-cosYaw * forward - sinYaw * strafe) * MOVE_SPEED * dt;
+    this.cameraY += vertical * MOVE_SPEED * dt;
   }
 
   private render() {
     const aspect = this.backingWidth / this.backingHeight || 1;
     this.renderer.render(this.context, {
+      eye: [this.cameraX, this.cameraY, this.cameraZ],
       yaw: this.cameraYaw,
-      height: this.cameraHeight,
-      distance: this.cameraDistance,
+      pitch: this.cameraPitch,
     }, aspect, this.wireframeMode);
     this.renderDebugOverlay();
   }

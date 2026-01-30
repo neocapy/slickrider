@@ -18,8 +18,9 @@ Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; 
 
 - `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates Voronoi sites, computes k-NN (k=30), builds Voronoi cells, marks cells with Y < waterHeight as solid, extracts culled mesh, passes to `Renderer`
 - Loop: `requestAnimationFrame` -> `timing.update()` -> `onResize()` -> `update()` (includes `input.update()`) -> `render()`
-- Owns `Input` instance; `update()` polls input and adjusts camera (yaw/height/distance)
-- Camera defaults: height 60, distance 120, distances [80, 120, 200]
+- Owns `Input` instance; `update()` polls input for FPS camera movement and mouse look
+- FPS camera: position (x, y, z), yaw, pitch. Defaults: position (0, 40, 0), yaw 0, pitch 0
+- WASD moves in XZ plane relative to yaw, Q/E for debug vertical, mouse click+drag rotates. Speed 30 units/s, sensitivity 0.003
 - `render()` delegates to `Renderer.render()`, then updates the debug overlay
 - F2 toggles the debug overlay (a DOM div, styled in `index.html`)
 - F3 toggles wireframe rendering mode
@@ -90,7 +91,7 @@ Constructor: `new Renderer(device, format, mesh: SceneMesh)`.
 Methods:
 - `destroy()` -- destroys all GPU buffers and textures
 - `resize(w, h)` -- recreate 4 offscreen textures + rebuild bind groups
-- `render(context, camera: { yaw, height, distance }, aspect)` -- encode and submit 3 render passes
+- `render(context, camera: { eye: Vec3, yaw, pitch }, aspect)` -- encode and submit 3 render passes
 
 **3-pass pipeline:**
 1. **Opaque pass** -> renders opaque geometry to offscreen `opaqueColor` + `opaqueDepth`
@@ -108,7 +109,7 @@ Methods:
 - Group 1 (water pass): opaqueDepth (recreated on resize)
 - Group 0 (composite): compositeUniforms (near/far) + all 4 offscreen textures (recreated on resize)
 
-Shaders: 4 WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER, WIREFRAME_SHADER). Two directional lights + Fresnel rim lighting. Camera targets (0, 30, 0), near 0.1, far 500.
+Shaders: 4 WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER, WIREFRAME_SHADER). Two directional lights + Fresnel rim lighting. Camera target computed from eye + forward(yaw, pitch), near 0.1, far 1000.
 
 **Wireframe mode:** When `wireframe` flag is true, skips the 3-pass pipeline. Two passes: (1) Depth pre-pass renders solid triangles (both opaque + transparent) with color writes off to populate depth buffer, clears color to white. (2) Wireframe pass loads existing depth, draws back lines (depthCompare greater, alpha 0.3 black) then front lines (depthCompare less-equal, solid black). Neither wireframe pass writes depth. Wireframe index buffers convert each quad's 6 triangle indices into 8 line indices (4 edges).
 
@@ -116,19 +117,21 @@ Shaders: 4 WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER, WIREFRAM
 
 Unified input system. Actions are analog floats (0.0-1.0). Keyboard snaps to 0/1; gamepad provides analog values. Merges keyboard + gamepad via `Math.max` per action.
 
-Action enum: Up, Down, Left, Right, Jump, Pause.
+Action enum: Up, Down, Left, Right, Jump, Pause, DebugMoveUp, DebugMoveDown.
 
-Constructor: `new Input()` -- attaches keyboard listeners to `window`, gamepad connect/disconnect listeners.
+Constructor: `new Input()` -- attaches keyboard, gamepad, and mouse listeners to `window`.
 
 Methods:
 - `destroy()` -- removes all window event listeners
-- `update()` -- call once per frame. Snapshots previous state, rebuilds current from keyboard + gamepad polling.
+- `update()` -- call once per frame. Snapshots previous state, rebuilds current from keyboard + gamepad polling. Snapshots and resets mouse delta.
 - `value(action)` -- raw float 0.0-1.0
 - `isPressed(action)` -- value >= 0.5
 - `justPressed(action)` -- crossed above 0.5 this frame
 - `justReleased(action)` -- crossed below 0.5 this frame
+- `mouseDelta()` -- returns `[dx, dy]` pixel delta from mouse drag this frame
 
-Keyboard: WASD + Space + Escape via keydown/keyup on window.
+Keyboard: WASD + QE + Space + Escape via keydown/keyup on window.
+Mouse: click+drag accumulates movementX/Y, returned via `mouseDelta()` each frame.
 Gamepad: standard mapping -- A(0)=Jump, Start(9)=Pause, D-pad(12-15), left stick axes with deadzone 0.3.
 
 ### `src/timing.ts` -- `Timing`, `FrameTimeStats`

@@ -523,18 +523,18 @@ export class Renderer {
     });
   }
 
-  render(context: GPUCanvasContext, camera: { yaw: number; height: number; distance: number }, aspect: number, wireframe = false) {
+  render(context: GPUCanvasContext, camera: { eye: Vec3; yaw: number; pitch: number }, aspect: number, wireframe = false) {
     if (!this.opaqueDepthTex) return;
 
-    const eye: Vec3 = [
-      Math.sin(camera.yaw) * camera.distance,
-      camera.height,
-      Math.cos(camera.yaw) * camera.distance,
+    const eye = camera.eye;
+    const target: Vec3 = [
+      eye[0] - Math.sin(camera.yaw) * Math.cos(camera.pitch),
+      eye[1] + Math.sin(camera.pitch),
+      eye[2] - Math.cos(camera.yaw) * Math.cos(camera.pitch),
     ];
-    const target: Vec3 = [0, 30, 0];
 
     const near = 0.1;
-    const far = 500;
+    const far = 1000;
     const fov = 60 * Math.PI / 180;
     const proj = mat4Perspective(fov, aspect, near, far);
     const view = mat4LookAt(eye, target, [0, 1, 0]);

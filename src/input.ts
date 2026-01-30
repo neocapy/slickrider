@@ -5,6 +5,8 @@ export enum Action {
   Right,
   Jump,
   Pause,
+  DebugMoveUp,
+  DebugMoveDown,
   COUNT,
 }
 
@@ -18,6 +20,8 @@ const KEY_BINDINGS = new Map<string, Action>([
   ["KeyD", Action.Right],
   ["Space", Action.Jump],
   ["Escape", Action.Pause],
+  ["KeyE", Action.DebugMoveUp],
+  ["KeyQ", Action.DebugMoveDown],
 ]);
 
 // Standard gamepad button -> action
@@ -36,11 +40,20 @@ export class Input {
   private heldKeys = new Set<string>();
   private gamepadIndex: number | null = null;
 
+  private mouseDX = 0;
+  private mouseDY = 0;
+  private frameMouseDX = 0;
+  private frameMouseDY = 0;
+  private mouseDown = false;
+
   constructor() {
     window.addEventListener("keydown", this.onKeyDown);
     window.addEventListener("keyup", this.onKeyUp);
     window.addEventListener("gamepadconnected", this.onGamepadConnected);
     window.addEventListener("gamepaddisconnected", this.onGamepadDisconnected);
+    window.addEventListener("mousedown", this.onMouseDown);
+    window.addEventListener("mouseup", this.onMouseUp);
+    window.addEventListener("mousemove", this.onMouseMove);
   }
 
   destroy(): void {
@@ -48,11 +61,23 @@ export class Input {
     window.removeEventListener("keyup", this.onKeyUp);
     window.removeEventListener("gamepadconnected", this.onGamepadConnected);
     window.removeEventListener("gamepaddisconnected", this.onGamepadDisconnected);
+    window.removeEventListener("mousedown", this.onMouseDown);
+    window.removeEventListener("mouseup", this.onMouseUp);
+    window.removeEventListener("mousemove", this.onMouseMove);
+  }
+
+  mouseDelta(): [number, number] {
+    return [this.frameMouseDX, this.frameMouseDY];
   }
 
   update(): void {
     this.previous.set(this.current);
     this.current.fill(0);
+
+    this.frameMouseDX = this.mouseDX;
+    this.frameMouseDY = this.mouseDY;
+    this.mouseDX = 0;
+    this.mouseDY = 0;
 
     // Keyboard
     for (const [code, action] of KEY_BINDINGS) {
@@ -132,6 +157,21 @@ export class Input {
   private onGamepadDisconnected = (e: GamepadEvent): void => {
     if (this.gamepadIndex === e.gamepad.index) {
       this.gamepadIndex = null;
+    }
+  };
+
+  private onMouseDown = (e: MouseEvent): void => {
+    if (e.button === 0) this.mouseDown = true;
+  };
+
+  private onMouseUp = (e: MouseEvent): void => {
+    if (e.button === 0) this.mouseDown = false;
+  };
+
+  private onMouseMove = (e: MouseEvent): void => {
+    if (this.mouseDown) {
+      this.mouseDX += e.movementX;
+      this.mouseDY += e.movementY;
     }
   };
 }
