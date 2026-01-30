@@ -3,6 +3,7 @@ import { Renderer } from "./renderer";
 import { Timing } from "./timing";
 import { buildSceneMesh, type WorldBounds } from "./scenemesh";
 import { generateVoronoiSites, computeKNN } from "./voronoi";
+import { buildVoronoiCells, extractVoronoiMesh } from "./convexcell";
 import { Material } from "./materials";
 
 export class Game {
@@ -57,23 +58,30 @@ export class Game {
     this.bounds = bounds;
     this.waterHeight = waterHeight;
     const sites = generateVoronoiSites(bounds, 4000);
-    const knn = computeKNN(sites, bounds, 10);
+    const k = 30;
+    const knn = computeKNN(sites, bounds, k);
     const siteCount = sites.length / 3;
-    const k = 10;
 
-    // Debug visualization: pick 4 probes, color their neighborhoods
-    const siteColors = new Uint8Array(siteCount).fill(Material.Frame);
-    const probeCount = 4;
-    const neighborMats = [Material.Stone, Material.Dirt, Material.Grass, Material.Concrete];
-    for (let p = 0; p < probeCount; p++) {
-      const probeIdx = Math.floor(Math.random() * siteCount);
-      siteColors[probeIdx] = Material.Air; // pink probe
-      for (let ni = 0; ni < k; ni++) {
-        siteColors[knn[probeIdx * k + ni]] = neighborMats[p];
-      }
+    const halfX = bounds.sizeX / 2;
+    const halfZ = bounds.sizeZ / 2;
+
+    // Build Voronoi cells
+    const cells = buildVoronoiCells(
+      sites, knn, k,
+      -halfX, halfX, 0, bounds.sizeY, -halfZ, halfZ,
+    );
+
+    // Mark bottom half of cells as solid (simple test: site Y < waterHeight)
+    const solid = new Array<boolean>(siteCount);
+    for (let i = 0; i < siteCount; i++) {
+      solid[i] = sites[i * 3 + 1] < waterHeight;
     }
 
-    const mesh = buildSceneMesh(bounds, waterHeight, sites, siteColors);
+    // Extract mesh with internal face culling
+    const voronoiMesh = extractVoronoiMesh(cells, solid, Material.Stone);
+    console.log(`Voronoi mesh: ${voronoiMesh.vertices.length / 7} verts, ${voronoiMesh.indices.length / 3} tris`);
+
+    const mesh = buildSceneMesh(bounds, waterHeight, null, null, voronoiMesh);
     this.renderer = new Renderer(device, format, mesh);
   }
 

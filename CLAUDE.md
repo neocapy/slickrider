@@ -16,7 +16,7 @@ Entry point. Grabs DOM elements, calls `Game.create()`, displays errors.
 
 Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; use `Game.create(canvas)`.
 
-- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates Voronoi sites, builds mesh via `buildSceneMesh`, passes mesh to `Renderer`
+- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates Voronoi sites, computes k-NN (k=30), builds Voronoi cells, marks cells with Y < waterHeight as solid, extracts culled mesh, passes to `Renderer`
 - Loop: `requestAnimationFrame` -> `timing.update()` -> `onResize()` -> `update()` (includes `input.update()`) -> `render()`
 - Owns `Input` instance; `update()` polls input and adjusts camera (yaw/height/distance)
 - Camera defaults: height 60, distance 120, distances [80, 120, 200]
@@ -54,7 +54,7 @@ Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaq
 - `WorldBounds` interface: `{ sizeX, sizeY, sizeZ }` (runtime-configurable)
 - `SceneMesh` interface: `{ opaqueVertices, opaqueIndices, transparentVertices, transparentIndices }`
 - `VERTEX_FLOATS = 7`
-- `buildSceneMesh(bounds, waterHeight, sites?, siteColors?)` -> `SceneMesh` — optional `sites: Float64Array | null` adds 0.3³ boxes at each site position, colored by `siteColors: Uint8Array | null` (per-site material index, defaults to Stone)
+- `buildSceneMesh(bounds, waterHeight, sites?, siteColors?, extraOpaque?)` -> `SceneMesh` — optional `sites` adds 0.3³ boxes, `siteColors` sets per-site material, `extraOpaque: { vertices, indices }` merges additional opaque geometry
 
 **Frame:** 12 thin boxes (0.2m thickness) forming the edges of the world volume, positioned just outside the volume boundary. Uses `Frame` material (pitch black).
 
@@ -67,6 +67,19 @@ Point generation with minimum-distance rejection and k-nearest-neighbor search, 
 - `SpatialGrid` class (not exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. `side` field is readonly. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
 - `generateVoronoiSites(bounds, count, minDistance?)` -> `Float64Array` (flat xyz triples). Default minDistance: `cbrt(volume/count) * 0.3`. Uses rejection sampling with max `count * 20` attempts.
 - `computeKNN(sites, bounds, k)` -> `Uint32Array` (flat `n × k`). For site `i`, neighbors at `i*k .. i*k+k-1`, sorted nearest-first. Uses expanding-radius grid queries with max-heap replacement.
+
+### `src/convexcell.ts` -- `ConvexCell`, `buildVoronoiCells`, `extractVoronoiMesh`
+
+3D Voronoi cell construction via iterative half-space clipping (Ray et al. 2018).
+
+- `ConvexCell` class: dual representation (planes P + triangles T of plane indices). No explicit vertex storage — positions computed by intersecting 3 planes.
+  - `ConvexCell.fromBoundingBox(xMin, xMax, yMin, yMax, zMin, zMax)` — creates cell with 6 planes, 12 dual triangles
+  - `clipByPlane(plane, neighborIdx)` — clips cell by half-space, tracks which neighbor produced each plane. Returns false if degenerate.
+  - `vertexPosition(triIdx)` — computes 3D point from 3-plane intersection
+  - `extractFaces()` — returns `{ vertices, neighbor, planeIdx }[]` with vertices ordered by angle
+  - `neighborOf: Int32Array` — per-plane: site index that produced it (-1 = bounding box)
+- `buildVoronoiCells(sites, knn, k, xMin, xMax, yMin, yMax, zMin, zMax)` -> `ConvexCell[]` — builds all cells by clipping each site's cell against its k-NN bisector planes
+- `extractVoronoiMesh(cells, solid, material)` -> `{ vertices, indices }` — extracts renderable mesh with internal face culling. Only emits faces where `solid[i] != solid[neighbor]`. Boundary faces (neighbor = -1) only render if cell is solid.
 
 ### `src/renderer.ts` -- `Renderer`
 

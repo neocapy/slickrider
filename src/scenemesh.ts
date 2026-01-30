@@ -47,7 +47,13 @@ function pushBox(
   pushQuad(verts, idxs, base, x1,y0,z0, x0,y0,z0, x0,y1,z0, x1,y1,z0,  0, 0,-1, mat); // -Z
 }
 
-export function buildSceneMesh(bounds: WorldBounds, waterHeight: number, sites: Float64Array | null = null, siteColors: Uint8Array | null = null): SceneMesh {
+export function buildSceneMesh(
+  bounds: WorldBounds,
+  waterHeight: number,
+  sites: Float64Array | null = null,
+  siteColors: Uint8Array | null = null,
+  extraOpaque: { vertices: Float32Array; indices: Uint32Array } | null = null,
+): SceneMesh {
   const halfX = bounds.sizeX / 2;
   const halfZ = bounds.sizeZ / 2;
   const h = bounds.sizeY;
@@ -113,6 +119,18 @@ export function buildSceneMesh(bounds: WorldBounds, waterHeight: number, sites: 
      waterExtent, waterHeight, -waterExtent, 0, 1, 0, wMat,
   );
   tIdxs.push(0, 1, 2, 0, 2, 3);
+
+  // Merge extra opaque geometry (e.g. Voronoi cell faces)
+  if (extraOpaque) {
+    const vertOffset = base.v;
+    for (let i = 0; i < extraOpaque.vertices.length; i++) {
+      oVerts.push(extraOpaque.vertices[i]);
+    }
+    for (let i = 0; i < extraOpaque.indices.length; i++) {
+      oIdxs.push(extraOpaque.indices[i] + vertOffset);
+    }
+    base.v += extraOpaque.vertices.length / VERTEX_FLOATS;
+  }
 
   return {
     opaqueVertices: new Float32Array(oVerts),
