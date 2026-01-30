@@ -67,7 +67,7 @@ export class Game {
 
     // Build Voronoi cells
     const cells = buildVoronoiCells(
-      sites, knn, k,
+      sites, knn, k, bounds,
       -halfX, halfX, 0, bounds.sizeY, -halfZ, halfZ,
     );
 

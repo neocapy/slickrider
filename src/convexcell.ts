@@ -12,6 +12,8 @@
  */
 
 import type { Vec3 } from "./math";
+import { SpatialGrid } from "./voronoi";
+import type { WorldBounds } from "./scenemesh";
 
 // Plane equation: ax + by + cz + d > 0 is inside
 type Plane = [number, number, number, number]; // a, b, c, d
@@ -79,6 +81,23 @@ export class ConvexCell {
   vertexPosition(triIdx: number): Vec3 | null {
     const [a, b, c] = this.tris[triIdx];
     return intersect3Planes(this.planes[a], this.planes[b], this.planes[c]);
+  }
+
+  /**
+   * Compute the security radius: max distance from a point to any vertex.
+   * If a candidate neighbor site is farther than 2× this from the cell's
+   * own site, it cannot possibly clip the cell.
+   */
+  securityRadius(sx: number, sy: number, sz: number): number {
+    let maxR2 = 0;
+    for (let i = 0; i < this.numTris; i++) {
+      const pos = this.vertexPosition(i);
+      if (!pos) continue;
+      const dx = pos[0] - sx, dy = pos[1] - sy, dz = pos[2] - sz;
+      const r2 = dx * dx + dy * dy + dz * dz;
+      if (r2 > maxR2) maxR2 = r2;
+    }
+    return Math.sqrt(maxR2);
   }
 
   /**
@@ -327,6 +346,7 @@ export function buildVoronoiCells(
   sites: Float64Array,
   knn: Uint32Array,
   k: number,
+  bounds: WorldBounds,
   xMin: number, xMax: number,
   yMin: number, yMax: number,
   zMin: number, zMax: number,
@@ -335,52 +355,110 @@ export function buildVoronoiCells(
   const n = sites.length / 3;
   const cells: ConvexCell[] = [];
 
+  // Build spatial grid for fallback neighbor queries
+  const grid = new SpatialGrid(bounds, Math.min(n, 4000));
+  for (let i = 0; i < n; i++) {
+    grid.insert([sites[i * 3], sites[i * 3 + 1], sites[i * 3 + 2]], i);
+  }
+
+  // Pre-sort each site's knn by distance (nearest first)
+  const sortedKnn: number[][] = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const sx = sites[i * 3], sy = sites[i * 3 + 1], sz = sites[i * 3 + 2];
+    const neighbors: { j: number; d2: number }[] = [];
+    for (let ni = 0; ni < k; ni++) {
+      const j = knn[i * k + ni];
+      if (j === i) continue;
+      const dx = sites[j * 3] - sx, dy = sites[j * 3 + 1] - sy, dz = sites[j * 3 + 2] - sz;
+      neighbors.push({ j, d2: dx * dx + dy * dy + dz * dz });
+    }
+    neighbors.sort((a, b) => a.d2 - b.d2);
+    sortedKnn[i] = neighbors.map(nb => nb.j);
+  }
+
+  let totalFallbacks = 0;
+  // Recheck interval: recompute security radius every this many clips
+  const RECHECK_INTERVAL = 4;
+
   for (let i = 0; i < n; i++) {
     const sx = sites[i * 3];
     const sy = sites[i * 3 + 1];
     const sz = sites[i * 3 + 2];
 
     const cell = ConvexCell.fromBoundingBox(xMin, xMax, yMin, yMax, zMin, zMax);
+    const clipped = new Set<number>();
+    let secure = false;
 
-    // Clip by each neighbor's bisector plane
-    for (let ni = 0; ni < k; ni++) {
-      const j = knn[i * k + ni];
-      if (j === i) continue;
+    // Phase 1: clip against knn neighbors (sorted nearest-first),
+    // with interleaved security radius checks for early-out
+    const knnList = sortedKnn[i];
+    for (let ni = 0; ni < knnList.length; ni++) {
+      const j = knnList[ni];
 
-      const jx = sites[j * 3];
-      const jy = sites[j * 3 + 1];
-      const jz = sites[j * 3 + 2];
+      // Periodically check if we can stop early
+      if (ni > 0 && ni % RECHECK_INTERVAL === 0) {
+        const secR = cell.securityRadius(sx, sy, sz);
+        const threshold = secR * 2;
+        // knn is sorted by distance — if this neighbor is beyond threshold, all remaining are too
+        const dx = sites[j * 3] - sx, dy = sites[j * 3 + 1] - sy, dz = sites[j * 3 + 2] - sz;
+        if (Math.sqrt(dx * dx + dy * dy + dz * dz) > threshold) {
+          secure = true;
+          break;
+        }
+      }
 
-      // Bisector plane: midpoint between i and j, normal pointing toward i
-      const mx = (sx + jx) * 0.5;
-      const my = (sy + jy) * 0.5;
-      const mz = (sz + jz) * 0.5;
+      if (!clipCellByNeighbor(cell, sites, i, j, sx, sy, sz)) break;
+      clipped.add(j);
+    }
 
-      // Normal = (site_i - site_j), normalized
-      let nx = sx - jx;
-      let ny = sy - jy;
-      let nz = sz - jz;
-      const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      if (len < 1e-12) continue;
-      nx /= len; ny /= len; nz /= len;
+    // Phase 2: if not proven secure, query grid for missing neighbors
+    if (!secure) {
+      const secR = cell.securityRadius(sx, sy, sz);
+      const queryRadius = secR * 2;
+      const nearby = grid.nearbyIndices([sx, sy, sz], queryRadius);
+      let needed = false;
 
-      // Plane: nx*x + ny*y + nz*z + d > 0, where d = -(nx*mx + ny*my + nz*mz)
-      const d = -(nx * mx + ny * my + nz * mz);
+      // Sort fallback candidates by distance so we clip nearest-first
+      const candidates: { j: number; dist: number }[] = [];
+      for (let ni = 0; ni < nearby.length; ni++) {
+        const j = nearby[ni];
+        if (j === i || clipped.has(j)) continue;
+        const dx = sites[j * 3] - sx, dy = sites[j * 3 + 1] - sy, dz = sites[j * 3 + 2] - sz;
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist < queryRadius) {
+          candidates.push({ j, dist });
+        }
+      }
+      candidates.sort((a, b) => a.dist - b.dist);
 
-      // Security radius check: if this neighbor is more than 2× the
-      // bounding ball radius away, it can't affect the cell
-      // (We skip this optimization for now — k is small)
-
-      const valid = cell.clipByPlane([nx, ny, nz, d], j);
-      if (!valid) break;
+      for (const c of candidates) {
+        if (!needed) { needed = true; totalFallbacks++; }
+        if (!clipCellByNeighbor(cell, sites, i, c.j, sx, sy, sz)) break;
+        clipped.add(c.j);
+      }
     }
 
     cells.push(cell);
   }
 
   const elapsed = performance.now() - t0;
-  console.log(`Voronoi cells: built ${n} cells in ${elapsed.toFixed(1)}ms`);
+  console.log(`Voronoi cells: built ${n} cells in ${elapsed.toFixed(1)}ms (${totalFallbacks} needed fallback)`);
   return cells;
+}
+
+function clipCellByNeighbor(
+  cell: ConvexCell, sites: Float64Array,
+  i: number, j: number,
+  sx: number, sy: number, sz: number,
+): boolean {
+  const jx = sites[j * 3], jy = sites[j * 3 + 1], jz = sites[j * 3 + 2];
+  const mx = (sx + jx) * 0.5, my = (sy + jy) * 0.5, mz = (sz + jz) * 0.5;
+  let nx = sx - jx, ny = sy - jy, nz = sz - jz;
+  const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+  if (len < 1e-12) return true;
+  nx /= len; ny /= len; nz /= len;
+  const d = -(nx * mx + ny * my + nz * mz);
+  return cell.clipByPlane([nx, ny, nz, d], j);
 }
 
 /**

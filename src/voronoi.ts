@@ -1,7 +1,7 @@
 import type { Vec3 } from "./math";
 import type { WorldBounds } from "./scenemesh";
 
-class SpatialGrid {
+export class SpatialGrid {
   private nx: number;
   private ny: number;
   private nz: number;
