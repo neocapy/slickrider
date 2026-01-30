@@ -1,9 +1,12 @@
 /**
- * Mesh post-processing: edge-collapse simplification.
+ * Mesh post-processing: edge-collapse simplification, Loop subdivision,
+ * Taubin smoothing, and material repainting.
  * Vertex format: 7 floats per vertex (x, y, z, nx, ny, nz, mat).
  * Maintains watertight topology by only collapsing edges where the
  * local neighborhood stays manifold.
  */
+
+import { Material } from "./materials";
 
 const VERTEX_FLOATS = 7;
 
@@ -89,12 +92,391 @@ function deduplicateVertices(mesh: RawMesh, epsilon = 1e-4): RawMesh {
   return { vertices: new Float32Array(outVerts), indices: outIndices };
 }
 
+// ---------------------------------------------------------------------------
+// Loop subdivision
+// ---------------------------------------------------------------------------
+
+function edgeKey(a: number, b: number): string {
+  return a < b ? `${a},${b}` : `${b},${a}`;
+}
+
+interface EdgeInfo {
+  v0: number;
+  v1: number;
+  midIdx: number;           // filled in during midpoint creation
+  tris: number[];           // adjacent triangle indices (1 = boundary, 2 = interior)
+}
+
+/**
+ * One iteration of Loop subdivision. Each triangle becomes 4; vertex count
+ * roughly doubles (one new vertex per edge). Boundary edges and vertices
+ * use the standard boundary stencils.
+ */
+function loopSubdivide(mesh: RawMesh): RawMesh {
+  const t0 = performance.now();
+  const vertCount = mesh.vertices.length / VERTEX_FLOATS;
+  const triCount = mesh.indices.length / 3;
+
+  // --- Build edge map and per-vertex neighbor / boundary info ---
+  const edges = new Map<string, EdgeInfo>();
+  // Per-vertex: set of neighbor vertex indices
+  const neighbors: Set<number>[] = new Array(vertCount);
+  for (let i = 0; i < vertCount; i++) neighbors[i] = new Set();
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = mesh.indices[t * 3];
+    const i1 = mesh.indices[t * 3 + 1];
+    const i2 = mesh.indices[t * 3 + 2];
+    const verts = [i0, i1, i2];
+    for (let e = 0; e < 3; e++) {
+      const a = verts[e], b = verts[(e + 1) % 3];
+      neighbors[a].add(b);
+      neighbors[b].add(a);
+      const key = edgeKey(a, b);
+      let info = edges.get(key);
+      if (!info) {
+        info = { v0: Math.min(a, b), v1: Math.max(a, b), midIdx: -1, tris: [] };
+        edges.set(key, info);
+      }
+      info.tris.push(t);
+    }
+  }
+
+  // Identify boundary vertices (any vertex on an edge with only 1 adjacent triangle)
+  const isBoundary = new Uint8Array(vertCount);
+  for (const info of edges.values()) {
+    if (info.tris.length === 1) {
+      isBoundary[info.v0] = 1;
+      isBoundary[info.v1] = 1;
+    }
+  }
+
+  // --- Allocate output vertex array ---
+  // Original verts (updated positions) + one new vert per edge
+  const newVertCount = vertCount + edges.size;
+  const outVerts = new Float32Array(newVertCount * VERTEX_FLOATS);
+
+  // Copy original positions (will be overwritten with Loop weights)
+  outVerts.set(mesh.vertices);
+
+  // --- Compute new positions for original vertices ---
+  for (let v = 0; v < vertCount; v++) {
+    const o = v * VERTEX_FLOATS;
+    const vx = mesh.vertices[o], vy = mesh.vertices[o + 1], vz = mesh.vertices[o + 2];
+
+    if (isBoundary[v]) {
+      // Boundary vertex: average with the two boundary neighbors
+      // Find boundary neighbors (neighbors connected via boundary edge)
+      const bNeighbors: number[] = [];
+      for (const nb of neighbors[v]) {
+        const key = edgeKey(v, nb);
+        const info = edges.get(key)!;
+        if (info.tris.length === 1) bNeighbors.push(nb);
+      }
+      if (bNeighbors.length === 2) {
+        const [n0, n1] = bNeighbors;
+        const o0 = n0 * VERTEX_FLOATS, o1 = n1 * VERTEX_FLOATS;
+        outVerts[o]     = (mesh.vertices[o0] + 6 * vx + mesh.vertices[o1]) / 8;
+        outVerts[o + 1] = (mesh.vertices[o0 + 1] + 6 * vy + mesh.vertices[o1 + 1]) / 8;
+        outVerts[o + 2] = (mesh.vertices[o0 + 2] + 6 * vz + mesh.vertices[o1 + 2]) / 8;
+      }
+      // else: irregular boundary, keep position
+    } else {
+      // Interior vertex: Loop beta formula
+      const n = neighbors[v].size;
+      if (n < 3) continue; // degenerate, keep position
+      const beta = n === 3 ? 3 / 16
+                 : (1 / n) * (5 / 8 - Math.pow(3 / 8 + (1 / 4) * Math.cos(2 * Math.PI / n), 2));
+      let sx = 0, sy = 0, sz = 0;
+      for (const nb of neighbors[v]) {
+        const no = nb * VERTEX_FLOATS;
+        sx += mesh.vertices[no];
+        sy += mesh.vertices[no + 1];
+        sz += mesh.vertices[no + 2];
+      }
+      outVerts[o]     = (1 - n * beta) * vx + beta * sx;
+      outVerts[o + 1] = (1 - n * beta) * vy + beta * sy;
+      outVerts[o + 2] = (1 - n * beta) * vz + beta * sz;
+    }
+    // normals/material: keep from original (will be recalculated later)
+  }
+
+  // --- Create edge midpoint vertices ---
+  let nextIdx = vertCount;
+  for (const info of edges.values()) {
+    const midIdx = nextIdx++;
+    info.midIdx = midIdx;
+    const o0 = info.v0 * VERTEX_FLOATS, o1 = info.v1 * VERTEX_FLOATS;
+    const mo = midIdx * VERTEX_FLOATS;
+
+    if (info.tris.length === 2) {
+      // Interior edge: Loop weights 3/8 + 3/8 + 1/8 + 1/8
+      // Find the two opposite vertices
+      const t0 = info.tris[0], t1 = info.tris[1];
+      let opp0 = -1, opp1 = -1;
+      for (let c = 0; c < 3; c++) {
+        const vi = mesh.indices[t0 * 3 + c];
+        if (vi !== info.v0 && vi !== info.v1) { opp0 = vi; break; }
+      }
+      for (let c = 0; c < 3; c++) {
+        const vi = mesh.indices[t1 * 3 + c];
+        if (vi !== info.v0 && vi !== info.v1) { opp1 = vi; break; }
+      }
+      if (opp0 >= 0 && opp1 >= 0) {
+        const oo0 = opp0 * VERTEX_FLOATS, oo1 = opp1 * VERTEX_FLOATS;
+        for (let f = 0; f < 3; f++) {
+          outVerts[mo + f] = (3 * mesh.vertices[o0 + f] + 3 * mesh.vertices[o1 + f]
+                            + mesh.vertices[oo0 + f] + mesh.vertices[oo1 + f]) / 8;
+        }
+      } else {
+        // Fallback: midpoint
+        for (let f = 0; f < 3; f++) {
+          outVerts[mo + f] = (mesh.vertices[o0 + f] + mesh.vertices[o1 + f]) / 2;
+        }
+      }
+    } else {
+      // Boundary edge: simple midpoint
+      for (let f = 0; f < 3; f++) {
+        outVerts[mo + f] = (mesh.vertices[o0 + f] + mesh.vertices[o1 + f]) / 2;
+      }
+    }
+    // Normal: average (placeholder, recalculated later)
+    for (let f = 3; f < 6; f++) {
+      outVerts[mo + f] = (mesh.vertices[o0 + f] + mesh.vertices[o1 + f]) / 2;
+    }
+    // Material: take from v0 (will be repainted)
+    outVerts[mo + 6] = mesh.vertices[o0 + 6];
+  }
+
+  // --- Generate 4 sub-triangles per original triangle ---
+  const outIndices = new Uint32Array(triCount * 4 * 3);
+  for (let t = 0; t < triCount; t++) {
+    const i0 = mesh.indices[t * 3];
+    const i1 = mesh.indices[t * 3 + 1];
+    const i2 = mesh.indices[t * 3 + 2];
+
+    const m01 = edges.get(edgeKey(i0, i1))!.midIdx;
+    const m12 = edges.get(edgeKey(i1, i2))!.midIdx;
+    const m20 = edges.get(edgeKey(i2, i0))!.midIdx;
+
+    const base = t * 12;
+    // Corner triangles
+    outIndices[base]     = i0;  outIndices[base + 1] = m01; outIndices[base + 2] = m20;
+    outIndices[base + 3] = i1;  outIndices[base + 4] = m12; outIndices[base + 5] = m01;
+    outIndices[base + 6] = i2;  outIndices[base + 7] = m20; outIndices[base + 8] = m12;
+    // Center triangle
+    outIndices[base + 9] = m01; outIndices[base + 10] = m12; outIndices[base + 11] = m20;
+  }
+
+  const elapsed = performance.now() - t0;
+  console.log(`Loop subdivide: ${vertCount} -> ${newVertCount} verts, ${triCount} -> ${triCount * 4} tris in ${elapsed.toFixed(0)}ms`);
+
+  return { vertices: outVerts, indices: outIndices };
+}
+
+// ---------------------------------------------------------------------------
+// Taubin smoothing
+// ---------------------------------------------------------------------------
+
+/**
+ * Taubin λ|μ smoothing: alternating positive/negative Laplacian passes
+ * to smooth without volume shrinkage. Boundary vertices are pinned.
+ */
+function taubinSmooth(mesh: RawMesh, iterations = 4, lambda = 0.5, mu = -0.53): RawMesh {
+  const t0 = performance.now();
+  const vertCount = mesh.vertices.length / VERTEX_FLOATS;
+  const triCount = mesh.indices.length / 3;
+
+  // Build adjacency and detect boundary
+  const adj: number[][] = new Array(vertCount);
+  for (let i = 0; i < vertCount; i++) adj[i] = [];
+  const edgeTri = new Map<string, number>(); // edge -> adjacent tri count
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = mesh.indices[t * 3], i1 = mesh.indices[t * 3 + 1], i2 = mesh.indices[t * 3 + 2];
+    const pairs: [number, number][] = [[i0, i1], [i1, i2], [i2, i0]];
+    for (const [a, b] of pairs) {
+      const key = edgeKey(a, b);
+      edgeTri.set(key, (edgeTri.get(key) ?? 0) + 1);
+    }
+  }
+  // Build adjacency (deduplicated)
+  const adjSets: Set<number>[] = new Array(vertCount);
+  for (let i = 0; i < vertCount; i++) adjSets[i] = new Set();
+  for (let t = 0; t < triCount; t++) {
+    const i0 = mesh.indices[t * 3], i1 = mesh.indices[t * 3 + 1], i2 = mesh.indices[t * 3 + 2];
+    adjSets[i0].add(i1); adjSets[i0].add(i2);
+    adjSets[i1].add(i0); adjSets[i1].add(i2);
+    adjSets[i2].add(i0); adjSets[i2].add(i1);
+  }
+  for (let i = 0; i < vertCount; i++) adj[i] = Array.from(adjSets[i]);
+
+  // Mark boundary vertices
+  const pinned = new Uint8Array(vertCount);
+  for (const [key, count] of edgeTri) {
+    if (count === 1) {
+      const [a, b] = key.split(",").map(Number);
+      pinned[a] = 1;
+      pinned[b] = 1;
+    }
+  }
+
+  // Working position arrays (double-buffered)
+  const pos = new Float64Array(vertCount * 3);
+  for (let i = 0; i < vertCount; i++) {
+    const o = i * VERTEX_FLOATS;
+    pos[i * 3]     = mesh.vertices[o];
+    pos[i * 3 + 1] = mesh.vertices[o + 1];
+    pos[i * 3 + 2] = mesh.vertices[o + 2];
+  }
+
+  function laplacianPass(factor: number) {
+    // Compute displacements first, apply after (Jacobi iteration)
+    const disp = new Float64Array(vertCount * 3);
+    for (let v = 0; v < vertCount; v++) {
+      if (pinned[v]) continue;
+      const nbs = adj[v];
+      if (nbs.length === 0) continue;
+      const vo = v * 3;
+      let lx = 0, ly = 0, lz = 0;
+      for (const nb of nbs) {
+        const no = nb * 3;
+        lx += pos[no]     - pos[vo];
+        ly += pos[no + 1] - pos[vo + 1];
+        lz += pos[no + 2] - pos[vo + 2];
+      }
+      const inv = 1 / nbs.length;
+      disp[vo]     = factor * lx * inv;
+      disp[vo + 1] = factor * ly * inv;
+      disp[vo + 2] = factor * lz * inv;
+    }
+    for (let v = 0; v < vertCount; v++) {
+      if (pinned[v]) continue;
+      const vo = v * 3;
+      pos[vo]     += disp[vo];
+      pos[vo + 1] += disp[vo + 1];
+      pos[vo + 2] += disp[vo + 2];
+    }
+  }
+
+  for (let iter = 0; iter < iterations; iter++) {
+    laplacianPass(lambda);
+    laplacianPass(mu);
+  }
+
+  // Write back positions
+  const outVerts = new Float32Array(mesh.vertices);
+  for (let i = 0; i < vertCount; i++) {
+    const o = i * VERTEX_FLOATS;
+    outVerts[o]     = pos[i * 3];
+    outVerts[o + 1] = pos[i * 3 + 1];
+    outVerts[o + 2] = pos[i * 3 + 2];
+  }
+
+  const elapsed = performance.now() - t0;
+  console.log(`Taubin smooth: ${iterations} iterations (λ=${lambda}, μ=${mu}) in ${elapsed.toFixed(0)}ms`);
+
+  return { vertices: outVerts, indices: mesh.indices };
+}
+
+// ---------------------------------------------------------------------------
+// Material repainting
+// ---------------------------------------------------------------------------
+
+/**
+ * Reassign per-vertex materials based on final vertex positions and
+ * averaged face normals. Replaces per-cell exposure classification
+ * after subdivision/smoothing has moved vertices.
+ */
+function repaintMaterials(mesh: RawMesh, waterHeight: number): RawMesh {
+  const t0 = performance.now();
+  const vertCount = mesh.vertices.length / VERTEX_FLOATS;
+  const triCount = mesh.indices.length / 3;
+
+  // Compute face normals
+  const faceNx = new Float64Array(triCount);
+  const faceNy = new Float64Array(triCount);
+  const faceNz = new Float64Array(triCount);
+
+  for (let t = 0; t < triCount; t++) {
+    const i0 = mesh.indices[t * 3], i1 = mesh.indices[t * 3 + 1], i2 = mesh.indices[t * 3 + 2];
+    const o0 = i0 * VERTEX_FLOATS, o1 = i1 * VERTEX_FLOATS, o2 = i2 * VERTEX_FLOATS;
+    const ax = mesh.vertices[o1] - mesh.vertices[o0];
+    const ay = mesh.vertices[o1 + 1] - mesh.vertices[o0 + 1];
+    const az = mesh.vertices[o1 + 2] - mesh.vertices[o0 + 2];
+    const bx = mesh.vertices[o2] - mesh.vertices[o0];
+    const by = mesh.vertices[o2 + 1] - mesh.vertices[o0 + 1];
+    const bz = mesh.vertices[o2 + 2] - mesh.vertices[o0 + 2];
+    let nx = ay * bz - az * by;
+    let ny = az * bx - ax * bz;
+    let nz = ax * by - ay * bx;
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    if (len > 0) { nx /= len; ny /= len; nz /= len; }
+    faceNx[t] = nx; faceNy[t] = ny; faceNz[t] = nz;
+  }
+
+  // Accumulate face normals per vertex
+  const vnx = new Float64Array(vertCount);
+  const vny = new Float64Array(vertCount);
+  const vnz = new Float64Array(vertCount);
+
+  for (let t = 0; t < triCount; t++) {
+    for (let c = 0; c < 3; c++) {
+      const v = mesh.indices[t * 3 + c];
+      vnx[v] += faceNx[t];
+      vny[v] += faceNy[t];
+      vnz[v] += faceNz[t];
+    }
+  }
+
+  // Classify and assign materials
+  const outVerts = new Float32Array(mesh.vertices);
+
+  for (let v = 0; v < vertCount; v++) {
+    const o = v * VERTEX_FLOATS;
+    const vy = outVerts[o + 1];
+
+    // Normalize accumulated normal
+    const nx = vnx[v], ny = vny[v], nz = vnz[v];
+    const len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+    const upDot = len > 0 ? ny / len : 0;
+
+    let mat: Material;
+    if (vy < waterHeight) {
+      mat = Material.Stone;
+    } else if (upDot > 0.7) {
+      mat = Material.Grass;
+    } else if (upDot < -0.7) {
+      mat = Material.Stone;
+    } else {
+      mat = Material.Dirt;
+    }
+
+    outVerts[o + 6] = mat;
+  }
+
+  const elapsed = performance.now() - t0;
+  console.log(`Repaint materials: ${vertCount} verts in ${elapsed.toFixed(0)}ms`);
+
+  return { vertices: outVerts, indices: mesh.indices };
+}
+
+// ---------------------------------------------------------------------------
+// Main pipeline
+// ---------------------------------------------------------------------------
+
+export interface SimplifyOptions {
+  subdivide?: boolean;
+  smooth?: boolean;
+  smoothIterations?: number;
+  waterHeight?: number;
+}
+
 /**
  * Simplify mesh by collapsing short edges while preserving watertight topology.
- * First deduplicates exact-position vertices to build shared topology,
- * then collapses edges shorter than `threshold` to their midpoint.
+ * Optionally applies Loop subdivision, Taubin smoothing, and material repainting.
  */
-export function simplifyMesh(mesh: RawMesh, threshold = 0.2): RawMesh {
+export function simplifyMesh(mesh: RawMesh, threshold = 0.2, options?: SimplifyOptions): RawMesh {
   // First: build proper shared-vertex mesh
   mesh = deduplicateVertices(mesh);
 
@@ -299,12 +681,23 @@ export function simplifyMesh(mesh: RawMesh, threshold = 0.2): RawMesh {
   const finalTris = outIndices.length / 3;
   console.log(`Simplify: ${collapseCount} collapses, ${vertCount} -> ${ni} verts, ${origTris} -> ${finalTris} tris (threshold ${threshold})`);
 
-  const collapsed: RawMesh = {
+  let result: RawMesh = {
     vertices: new Float32Array(outVerts),
     indices: new Uint32Array(outIndices),
   };
 
-  return recalcNormals(collapsed);
+  // Optional subdivision + smoothing + repaint
+  if (options?.subdivide) {
+    result = loopSubdivide(result);
+  }
+  if (options?.smooth) {
+    result = taubinSmooth(result, options.smoothIterations ?? 4);
+  }
+  if ((options?.subdivide || options?.smooth) && options?.waterHeight !== undefined) {
+    result = repaintMaterials(result, options.waterHeight);
+  }
+
+  return recalcNormals(result);
 }
 
 /**

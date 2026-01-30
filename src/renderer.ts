@@ -381,19 +381,25 @@ export class Renderer {
     this.transparentIndexBuffer = this.createAndUpload(mesh.transparentIndices, GPUBufferUsage.INDEX);
 
     // Wireframe index buffers: convert triangle indices to line-list edges
+    // Each triangle emits 3 edges; deduplicate so shared edges aren't drawn twice
     const toWireIndices = (triIndices: Uint32Array): Uint32Array => {
-      const quadCount = triIndices.length / 6;
-      const out = new Uint32Array(quadCount * 8);
-      for (let q = 0; q < quadCount; q++) {
-        const base = q * 6;
-        const a = triIndices[base], b = triIndices[base + 1], c = triIndices[base + 2], d = triIndices[base + 5];
-        const o = q * 8;
-        out[o] = a; out[o + 1] = b;
-        out[o + 2] = b; out[o + 3] = c;
-        out[o + 4] = c; out[o + 5] = d;
-        out[o + 6] = d; out[o + 7] = a;
+      const triCount = triIndices.length / 3;
+      const seen = new Set<string>();
+      const lines: number[] = [];
+      for (let t = 0; t < triCount; t++) {
+        const base = t * 3;
+        const v = [triIndices[base], triIndices[base + 1], triIndices[base + 2]];
+        for (let e = 0; e < 3; e++) {
+          const a = v[e], b = v[(e + 1) % 3];
+          const lo = Math.min(a, b), hi = Math.max(a, b);
+          const key = `${lo},${hi}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            lines.push(a, b);
+          }
+        }
       }
-      return out;
+      return new Uint32Array(lines);
     };
     const opaqueWireIndices = toWireIndices(mesh.opaqueIndices);
     const transparentWireIndices = toWireIndices(mesh.transparentIndices);

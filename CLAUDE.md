@@ -61,11 +61,16 @@ Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaq
 
 **Water plane:** Single large quad at `waterHeight`, extending to +/-1024 in XZ. Uses `Water` material. Rendered as transparent geometry through the water pass.
 
-### `src/meshopt.ts` -- `simplifyMesh`
+### `src/meshopt.ts` -- `simplifyMesh`, `SimplifyOptions`
 
-Edge-collapse mesh simplification that preserves watertight topology.
+Mesh post-processing pipeline: edge-collapse simplification, optional Loop subdivision, Taubin smoothing, and material repainting.
 
-- `simplifyMesh(mesh: { vertices: Float32Array, indices: Uint32Array }, threshold?)` -> `{ vertices, indices }`. Default threshold 0.2m. Greedy shortest-edge-first collapse with link condition check to prevent non-manifold topology. Collapsed edges merge to midpoint with averaged normals. Vertex format: 7 floats (x, y, z, nx, ny, nz, mat).
+- `SimplifyOptions` interface: `{ subdivide?, smooth?, smoothIterations?, waterHeight? }`
+- `simplifyMesh(mesh, threshold?, options?)` -> `{ vertices, indices }`. Pipeline: dedup → edge collapse → [Loop subdivide] → [Taubin smooth] → [repaint materials] → recalc normals. Default threshold 0.2m. Vertex format: 7 floats (x, y, z, nx, ny, nz, mat).
+- Edge collapse: greedy shortest-edge-first with link condition check to prevent non-manifold topology. Collapsed edges merge to midpoint with averaged normals.
+- Loop subdivision: 1 iteration, 4x triangles. Interior edges use weighted stencil (3/8 + 1/8 opposite verts), boundary edges use midpoint. Original vertex positions updated with valence-dependent β weights.
+- Taubin smoothing: alternating λ/μ Laplacian passes (default 4 iterations, λ=0.5, μ=-0.53). Boundary vertices pinned. Smooths without volume shrinkage.
+- Material repaint: reassigns per-vertex materials based on averaged face normals and vertex Y position. Upward-facing (dot>0.7) = Grass, downward (dot<-0.7) = Stone, side = Dirt, below waterHeight = Stone.
 
 ### `src/noise.ts` -- `noise3D`, `fbm3D`
 

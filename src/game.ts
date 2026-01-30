@@ -148,7 +148,12 @@ export class Game {
     // Extract mesh — use per-cell material, then weld nearby vertices
     const rawMesh = extractVoronoiMesh(cells, solid, material);
     console.log(`Voronoi mesh: ${rawMesh.vertices.length / 7} verts, ${rawMesh.indices.length / 3} tris`);
-    const voronoiMesh = simplifyMesh(rawMesh, 0.2);
+    const voronoiMesh = simplifyMesh(rawMesh, 0.2, {
+      subdivide: true,
+      smooth: true,
+      smoothIterations: 4,
+      waterHeight,
+    });
 
     const mesh = buildSceneMesh(bounds, waterHeight, null, null, voronoiMesh);
     this.renderer = new Renderer(device, format, mesh);
