@@ -60,6 +60,55 @@ export class SpatialGrid {
   }
 }
 
+export type SiteGenMethod = "rejection" | "grid";
+
+/**
+ * Grid-based site generation: divides the world into a regular grid of
+ * rectanguloids and places one point near the center of each cell,
+ * jittered by `jitter` fraction of the cell dimensions.
+ */
+export function generateGridSites(
+  bounds: WorldBounds,
+  count: number,
+  jitter = 0.2,
+): Float64Array {
+  const halfX = bounds.sizeX / 2;
+  const halfZ = bounds.sizeZ / 2;
+  const volume = bounds.sizeX * bounds.sizeY * bounds.sizeZ;
+  const cellVol = volume / count;
+  const cellSide = Math.cbrt(cellVol);
+
+  const nx = Math.round(bounds.sizeX / cellSide);
+  const ny = Math.round(bounds.sizeY / cellSide);
+  const nz = Math.round(bounds.sizeZ / cellSide);
+  const actual = nx * ny * nz;
+
+  const dx = bounds.sizeX / nx;
+  const dy = bounds.sizeY / ny;
+  const dz = bounds.sizeZ / nz;
+
+  const points = new Float64Array(actual * 3);
+  let idx = 0;
+
+  for (let iz = 0; iz < nz; iz++) {
+    for (let iy = 0; iy < ny; iy++) {
+      for (let ix = 0; ix < nx; ix++) {
+        const cx = (ix + 0.5) * dx - halfX;
+        const cy = (iy + 0.5) * dy;
+        const cz = (iz + 0.5) * dz - halfZ;
+
+        points[idx]     = cx + (Math.random() * 2 - 1) * jitter * dx;
+        points[idx + 1] = cy + (Math.random() * 2 - 1) * jitter * dy;
+        points[idx + 2] = cz + (Math.random() * 2 - 1) * jitter * dz;
+        idx += 3;
+      }
+    }
+  }
+
+  console.log(`Grid sites: ${actual} (${nx}×${ny}×${nz}), cell size ${dx.toFixed(2)}×${dy.toFixed(2)}×${dz.toFixed(2)}, jitter ${jitter}`);
+  return points;
+}
+
 export function generateVoronoiSites(
   bounds: WorldBounds,
   count: number,

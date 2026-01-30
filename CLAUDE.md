@@ -16,7 +16,7 @@ Entry point. Grabs DOM elements, calls `Game.create()`, displays errors.
 
 Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; use `Game.create(canvas)`.
 
-- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates 16384 Voronoi sites, computes k-NN (k=30), builds Voronoi cells, marks cells with Y < waterHeight as solid ground (Stone), seeds ~20 floating regions in the sky via BFS flood-fill over knn adjacency (20-60 cells each, cycling Stone/Dirt/Grass/Concrete), extracts culled mesh with per-cell materials, passes to `Renderer`
+- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, generates 16384 Voronoi sites, computes k-NN (k=30), builds Voronoi cells, selects solid cells via 3D fBm noise (ground below waterHeight always solid, sky cells solid where `fbm3D > threshold`), assigns materials by exposure (top-exposed=Grass, side-exposed=Dirt, bottom/interior=Stone), extracts culled mesh with per-cell materials, passes to `Renderer`
 - Loop: `requestAnimationFrame` -> `timing.update()` -> `onResize()` -> `update()` (includes `input.update()`) -> `render()`
 - Owns `Input` instance; `update()` polls input for FPS camera movement and mouse look
 - FPS camera: position (x, y, z), yaw, pitch. Defaults: position (0, 60, 0), yaw 0, pitch 0
@@ -61,12 +61,27 @@ Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaq
 
 **Water plane:** Single large quad at `waterHeight`, extending to +/-1024 in XZ. Uses `Water` material. Rendered as transparent geometry through the water pass.
 
-### `src/voronoi.ts` -- `SpatialGrid`, `generateVoronoiSites`, `computeKNN`
+### `src/meshopt.ts` -- `simplifyMesh`
 
-Point generation with minimum-distance rejection and k-nearest-neighbor search, both using a spatial grid.
+Edge-collapse mesh simplification that preserves watertight topology.
 
+- `simplifyMesh(mesh: { vertices: Float32Array, indices: Uint32Array }, threshold?)` -> `{ vertices, indices }`. Default threshold 0.2m. Greedy shortest-edge-first collapse with link condition check to prevent non-manifold topology. Collapsed edges merge to midpoint with averaged normals. Vertex format: 7 floats (x, y, z, nx, ny, nz, mat).
+
+### `src/noise.ts` -- `noise3D`, `fbm3D`
+
+3D Perlin noise with fractal Brownian motion. Uses a fixed permutation table (deterministic).
+
+- `noise3D(x, y, z)` -> roughly `[-1, 1]`. Classic improved Perlin noise.
+- `fbm3D(x, y, z, octaves?, lacunarity?, gain?)` -> roughly `[-1, 1]`. Layered noise with defaults: octaves=3, lacunarity=2.0, gain=0.5. Normalized by total amplitude.
+
+### `src/voronoi.ts` -- `SpatialGrid`, `generateVoronoiSites`, `generateGridSites`, `computeKNN`
+
+Point generation (two methods) and k-nearest-neighbor search, using a spatial grid.
+
+- `SiteGenMethod` type: `"rejection" | "grid"`
 - `SpatialGrid` class (exported): 3D bucket structure. Constructor takes `WorldBounds` + target bucket count. `side` field is readonly. Methods: `insert(point, index)`, `nearbyIndices(point, radius): number[]`.
-- `generateVoronoiSites(bounds, count, minDistance?)` -> `Float64Array` (flat xyz triples). Default minDistance: `cbrt(volume/count) * 0.3`. Uses rejection sampling with max `count * 20` attempts.
+- `generateVoronoiSites(bounds, count, minDistance?)` -> `Float64Array` (flat xyz triples). Rejection sampling with minimum distance. Default minDistance: `cbrt(volume/count) * 0.3`. Max `count * 20` attempts.
+- `generateGridSites(bounds, count, jitter?)` -> `Float64Array` (flat xyz triples). Divides world into regular grid of rectanguloids, places one point near each cell center with random jitter (default 0.2 = ±20% of cell size per axis). Actual count may differ slightly from target (product of per-axis divisions).
 - `computeKNN(sites, bounds, k)` -> `Uint32Array` (flat `n × k`). For site `i`, neighbors at `i*k .. i*k+k-1`, sorted nearest-first. Uses expanding-radius grid queries with max-heap replacement.
 
 ### `src/convexcell.ts` -- `ConvexCell`, `buildVoronoiCells`, `extractVoronoiMesh`

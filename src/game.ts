@@ -5,6 +5,8 @@ import { buildSceneMesh, type WorldBounds } from "./scenemesh";
 import { generateVoronoiSites, computeKNN } from "./voronoi";
 import { buildVoronoiCells, extractVoronoiMesh } from "./convexcell";
 import { Material } from "./materials";
+import { simplifyMesh } from "./meshopt";
+import { fbm3D } from "./noise";
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -71,61 +73,82 @@ export class Game {
       -halfX, halfX, 0, bounds.sizeY, -halfZ, halfZ,
     );
 
-    // Mark cells below water as solid ground
-    const solid = new Array<boolean>(siteCount);
+    // --- Solid selection via 3D fBm noise ---
+    const solid = new Array<boolean>(siteCount).fill(false);
     const material = new Uint8Array(siteCount);
+
+    const noiseFreq = 0.025;
+    const noiseThreshold = 0.15;
+
     for (let i = 0; i < siteCount; i++) {
+      const sx = sites[i * 3];
       const sy = sites[i * 3 + 1];
+      const sz = sites[i * 3 + 2];
+
       if (sy < waterHeight) {
+        // Ground: always solid
         solid[i] = true;
-        material[i] = Material.Stone;
-      }
-    }
-
-    // Seed ~20 floating regions in the sky and flood-fill via knn adjacency
-    const skyMaterials = [Material.Stone, Material.Dirt, Material.Grass, Material.Concrete];
-    const rng = (seed: number) => {
-      let s = seed;
-      return () => { s = (s * 1664525 + 1013904223) & 0x7fffffff; return s / 0x7fffffff; };
-    };
-    const rand = rng(42);
-
-    // Collect candidate sky cells (above water + margin)
-    const skyCells: number[] = [];
-    for (let i = 0; i < siteCount; i++) {
-      if (sites[i * 3 + 1] > waterHeight + 10) skyCells.push(i);
-    }
-
-    for (let region = 0; region < 20; region++) {
-      const seed = skyCells[Math.floor(rand() * skyCells.length)];
-      if (solid[seed]) continue;
-      const mat = skyMaterials[region % skyMaterials.length];
-      const regionSize = 20 + Math.floor(rand() * 40); // 20-60 cells per region
-
-      // BFS flood-fill using knn neighbors
-      const queue = [seed];
-      const visited = new Set<number>([seed]);
-      let filled = 0;
-      while (queue.length > 0 && filled < regionSize) {
-        const cur = queue.shift()!;
-        if (solid[cur]) continue;
-        solid[cur] = true;
-        material[cur] = mat;
-        filled++;
-        // Add knn neighbors
-        for (let n = 0; n < k; n++) {
-          const nb = knn[cur * k + n];
-          if (!visited.has(nb) && !solid[nb]) {
-            visited.add(nb);
-            queue.push(nb);
-          }
+      } else if (sy > waterHeight + 4) {
+        // Sky: noise-based selection
+        const n = fbm3D(sx * noiseFreq, sy * noiseFreq, sz * noiseFreq, 3, 2.0, 0.5);
+        if (n > noiseThreshold) {
+          solid[i] = true;
         }
       }
     }
 
-    // Extract mesh — use per-cell material
-    const voronoiMesh = extractVoronoiMesh(cells, solid, material);
-    console.log(`Voronoi mesh: ${voronoiMesh.vertices.length / 7} verts, ${voronoiMesh.indices.length / 3} tris`);
+    // --- Material assignment based on exposure ---
+    // For each solid cell, check knn neighbors to determine exposure direction
+    for (let i = 0; i < siteCount; i++) {
+      if (!solid[i]) continue;
+
+      const sy = sites[i * 3 + 1];
+
+      // Ground cells are stone
+      if (sy < waterHeight) {
+        material[i] = Material.Stone;
+        continue;
+      }
+
+      // Sky cells: classify by which directions have air neighbors
+      let hasAirAbove = false;
+      let hasAirBelow = false;
+      let hasAirSide = false;
+
+      for (let n = 0; n < k; n++) {
+        const nb = knn[i * k + n];
+        if (solid[nb]) continue;
+        // This neighbor is air — check relative Y
+        const dy = sites[nb * 3 + 1] - sy;
+        const dx = sites[nb * 3] - sites[i * 3];
+        const dz = sites[nb * 3 + 2] - sites[i * 3 + 2];
+        const horizDist = Math.sqrt(dx * dx + dz * dz);
+
+        if (dy > horizDist * 0.5) {
+          hasAirAbove = true;
+        } else if (dy < -horizDist * 0.5) {
+          hasAirBelow = true;
+        } else {
+          hasAirSide = true;
+        }
+      }
+
+      if (hasAirAbove) {
+        material[i] = Material.Grass;
+      } else if (hasAirSide && !hasAirBelow) {
+        material[i] = Material.Dirt;
+      } else if (hasAirBelow) {
+        material[i] = Material.Stone;
+      } else {
+        // Fully interior
+        material[i] = Material.Dirt;
+      }
+    }
+
+    // Extract mesh — use per-cell material, then weld nearby vertices
+    const rawMesh = extractVoronoiMesh(cells, solid, material);
+    console.log(`Voronoi mesh: ${rawMesh.vertices.length / 7} verts, ${rawMesh.indices.length / 3} tris`);
+    const voronoiMesh = simplifyMesh(rawMesh, 0.2);
 
     const mesh = buildSceneMesh(bounds, waterHeight, null, null, voronoiMesh);
     this.renderer = new Renderer(device, format, mesh);
