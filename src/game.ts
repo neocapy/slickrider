@@ -1,9 +1,7 @@
 import { Input, Action } from "./input";
 import { Renderer } from "./renderer";
 import { Timing } from "./timing";
-import { World } from "./world";
-import { generateWorld } from "./worldgen";
-import { buildWorldMesh } from "./worldmesh";
+import { buildSceneMesh, type WorldBounds } from "./scenemesh";
 
 export class Game {
   private canvas: HTMLCanvasElement;
@@ -38,20 +36,25 @@ export class Game {
   private readonly DISTANCES = [80, 120, 200];
   private cameraDistanceIndex = 1;
 
+  private bounds: WorldBounds;
+  private waterHeight: number;
+
   // Use Game.create() to construct.
   private constructor(
     canvas: HTMLCanvasElement,
     device: GPUDevice,
     context: GPUCanvasContext,
     format: GPUTextureFormat,
+    bounds: WorldBounds,
+    waterHeight: number,
   ) {
     this.canvas = canvas;
     this.device = device;
     this.context = context;
     this.format = format;
-    const world = new World();
-    generateWorld(world);
-    const mesh = buildWorldMesh(world);
+    this.bounds = bounds;
+    this.waterHeight = waterHeight;
+    const mesh = buildSceneMesh(bounds, waterHeight);
     this.renderer = new Renderer(device, format, mesh);
   }
 
@@ -71,7 +74,10 @@ export class Game {
 
     context.configure({ device, format, alphaMode: "opaque" });
 
-    const game = new Game(canvas, device, context, format);
+    const bounds: WorldBounds = { sizeX: 64, sizeY: 128, sizeZ: 64 };
+    const waterHeight = 16;
+
+    const game = new Game(canvas, device, context, format, bounds, waterHeight);
     game.bindEvents();
     game.onResize();
     game.start();

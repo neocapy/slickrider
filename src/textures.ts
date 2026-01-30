@@ -62,6 +62,9 @@ const layerGenerators: ColorFn[] = [
     const base = 180 + (v & 15) - 8;
     return [base, base + 2, base + 4, 255];
   },
+
+  // Frame - pitch black
+  (_x, _y) => [0, 0, 0, 255],
 ];
 
 export function createMaterialTextureArray(device: GPUDevice): {

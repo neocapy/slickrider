@@ -16,7 +16,7 @@ Entry point. Grabs DOM elements, calls `Game.create()`, displays errors.
 
 Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; use `Game.create(canvas)`.
 
-- `create()`: initializes WebGPU, creates `World`, runs `generateWorld`, builds mesh via `buildWorldMesh`, passes mesh to `Renderer`
+- `create()`: initializes WebGPU, creates `WorldBounds` + `waterHeight`, builds mesh via `buildSceneMesh`, passes mesh to `Renderer`
 - Loop: `requestAnimationFrame` -> `timing.update()` -> `onResize()` -> `update()` (includes `input.update()`) -> `render()`
 - Owns `Input` instance; `update()` polls input and adjusts camera (yaw/height/distance)
 - Camera defaults: height 60, distance 120, distances [80, 120, 200]
@@ -25,6 +25,8 @@ Owns the WebGPU device, canvas, game loop, and `Renderer`. Private constructor; 
 - F3 toggles wireframe rendering mode
 - `destroy()` -- cancels rAF, removes listeners, destroys input and renderer
 - Handles window resize and DPR changes (forwards resize to renderer)
+- Stores `bounds: WorldBounds` and `waterHeight: number` as instance fields (runtime-configurable)
+- Default bounds: sizeX=64, sizeY=128, sizeZ=64. Default waterHeight=16.
 
 ### `src/math.ts` -- Vec3, mat4 helpers
 
@@ -37,44 +39,32 @@ Exports:
 
 ### `src/materials.ts` -- `Material`, `MaterialInfo`
 
-Material enum and metadata. `Material`: Air(0), Water(1), Stone(2), Dirt(3), Grass(4), Concrete(5). `MATERIAL_COUNT = 6`. `MATERIAL_INFO` array with `name`, `isTransparent`, `isOpaque` per material.
+Material enum and metadata. `Material`: Air(0), Water(1), Stone(2), Dirt(3), Grass(4), Concrete(5), Frame(6). `MATERIAL_COUNT = 7`. `MATERIAL_INFO` array with `name`, `isTransparent`, `isOpaque` per material.
 
 ### `src/textures.ts`
 
-Generates a `texture_2d_array` (6 layers, each 16×16 RGBA8) with procedural patterns per material. Nearest-filtered sampler.
+Generates a `texture_2d_array` (7 layers, each 16x16 RGBA8) with procedural patterns per material. Nearest-filtered sampler. Frame material is pitch black.
 
-- `createMaterialTextureArray(device)` → `{ texture, sampler }`
+- `createMaterialTextureArray(device)` -> `{ texture, sampler }`
 
-### `src/world.ts` -- `World`
+### `src/scenemesh.ts` -- `WorldBounds`, `SceneMesh`
 
-Voxel world data model. 64×64 base (X/Z ∈ [-32,+31]), 128 tall (Y ∈ [0,127]). Centered at world origin. `Uint8Array` storage with Y-major indexing.
+Builds GPU-ready mesh from world bounds configuration (no voxels). Produces opaque geometry (frame edges) and transparent geometry (water plane).
 
-- `inBounds(x, y, z)` -- bounds check in world coords
-- `get(x, y, z)` -- returns `Material` (Air if out of bounds)
-- `set(x, y, z, mat)` -- sets material
-
-### `src/worldgen.ts`
-
-Procedural world generation. Height map from smooth-unioned SDF circles with erosion. Layers: Stone (bulk), Dirt (sub-surface), Grass (top). Water fills air below Y=16. Concrete houses placed on flat surface spots.
-
-- `generateWorld(world)` -- fills a `World` in-place
-
-### `src/worldmesh.ts` -- `WorldMesh`
-
-Converts `World` into GPU-ready mesh data using greedy meshing. Two meshes: opaque and transparent. Face culling: skips faces between adjacent opaque blocks or adjacent water blocks.
-
-**Greedy meshing:** For each of 6 face directions, iterates slices along that axis. Each slice builds a 2D grid of exposed-face materials, then greedily merges adjacent same-material faces into maximal rectangles. This reduces large flat surfaces from N quads to 1. Winding order is determined by cross-product check against the face normal.
-
-Vertex format: 7 floats (28 bytes) — position(3) + normal(3) + materialIndex(1). No UVs (computed in shader from worldPos + normal). Public API unchanged.
-
+- `WorldBounds` interface: `{ sizeX, sizeY, sizeZ }` (runtime-configurable)
+- `SceneMesh` interface: `{ opaqueVertices, opaqueIndices, transparentVertices, transparentIndices }`
 - `VERTEX_FLOATS = 7`
-- `buildWorldMesh(world)` → `WorldMesh { opaqueVertices, opaqueIndices, transparentVertices, transparentIndices }`
+- `buildSceneMesh(bounds, waterHeight)` -> `SceneMesh`
+
+**Frame:** 12 thin boxes (0.2m thickness) forming the edges of the world volume, positioned just outside the volume boundary. Uses `Frame` material (pitch black).
+
+**Water plane:** Single large quad at `waterHeight`, extending to +/-1024 in XZ. Uses `Water` material. Rendered as transparent geometry through the water pass.
 
 ### `src/renderer.ts` -- `Renderer`
 
 Owns all WebGPU rendering state. 3-pass depth-peeling renderer for water transparency. Uses `depth32float` format (required for sampling depth as texture).
 
-Constructor: `new Renderer(device, format, mesh: WorldMesh)`.
+Constructor: `new Renderer(device, format, mesh: SceneMesh)`.
 
 Methods:
 - `destroy()` -- destroys all GPU buffers and textures
@@ -82,15 +72,15 @@ Methods:
 - `render(context, camera: { yaw, height, distance }, aspect)` -- encode and submit 3 render passes
 
 **3-pass pipeline:**
-1. **Opaque pass** → renders opaque geometry to offscreen `opaqueColor` + `opaqueDepth`
-2. **Water pass** → renders water to `waterColor` + `waterDepth`, with manual depth test against `opaqueDepth` (discards fragments behind opaque geometry). Depth write ON, cull none.
-3. **Composite pass** → fullscreen triangle (no vertex buffer). Samples all 4 textures, linearizes depths, computes water thickness, blends with depth-dependent tint and alpha.
+1. **Opaque pass** -> renders opaque geometry to offscreen `opaqueColor` + `opaqueDepth`
+2. **Water pass** -> renders water to `waterColor` + `waterDepth`, with manual depth test against `opaqueDepth` (discards fragments behind opaque geometry). Depth write ON, cull none.
+3. **Composite pass** -> fullscreen triangle (no vertex buffer). Samples all 4 textures, linearizes depths, computes water thickness, blends with depth-dependent tint and alpha.
 
 **Offscreen textures** (created in `resize()`):
-- `opaqueColor` — canvas format, RENDER_ATTACHMENT + TEXTURE_BINDING
-- `opaqueDepth` — depth32float, RENDER_ATTACHMENT + TEXTURE_BINDING
-- `waterColor` — canvas format, RENDER_ATTACHMENT + TEXTURE_BINDING
-- `waterDepth` — depth32float, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `opaqueColor` -- canvas format, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `opaqueDepth` -- depth32float, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `waterColor` -- canvas format, RENDER_ATTACHMENT + TEXTURE_BINDING
+- `waterDepth` -- depth32float, RENDER_ATTACHMENT + TEXTURE_BINDING
 
 **Bind groups:**
 - Group 0 (shared, opaque+water): uniforms + material sampler + material texture array
@@ -103,16 +93,16 @@ Shaders: 4 WGSL strings (OPAQUE_SHADER, WATER_SHADER, COMPOSITE_SHADER, WIREFRAM
 
 ### `src/input.ts` -- `Input`, `Action`
 
-Unified input system. Actions are analog floats (0.0–1.0). Keyboard snaps to 0/1; gamepad provides analog values. Merges keyboard + gamepad via `Math.max` per action.
+Unified input system. Actions are analog floats (0.0-1.0). Keyboard snaps to 0/1; gamepad provides analog values. Merges keyboard + gamepad via `Math.max` per action.
 
 Action enum: Up, Down, Left, Right, Jump, Pause.
 
-Constructor: `new Input()` — attaches keyboard listeners to `window`, gamepad connect/disconnect listeners.
+Constructor: `new Input()` -- attaches keyboard listeners to `window`, gamepad connect/disconnect listeners.
 
 Methods:
 - `destroy()` -- removes all window event listeners
 - `update()` -- call once per frame. Snapshots previous state, rebuilds current from keyboard + gamepad polling.
-- `value(action)` -- raw float 0.0–1.0
+- `value(action)` -- raw float 0.0-1.0
 - `isPressed(action)` -- value >= 0.5
 - `justPressed(action)` -- crossed above 0.5 this frame
 - `justReleased(action)` -- crossed below 0.5 this frame

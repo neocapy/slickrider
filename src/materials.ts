@@ -5,9 +5,10 @@ export enum Material {
   Dirt = 3,
   Grass = 4,
   Concrete = 5,
+  Frame = 6,
 }
 
-export const MATERIAL_COUNT = 6;
+export const MATERIAL_COUNT = 7;
 
 export interface MaterialInfo {
   name: string;
@@ -22,4 +23,5 @@ export const MATERIAL_INFO: MaterialInfo[] = [
   { name: "Dirt",     isTransparent: false, isOpaque: true  },
   { name: "Grass",    isTransparent: false, isOpaque: true  },
   { name: "Concrete", isTransparent: false, isOpaque: true  },
+  { name: "Frame",    isTransparent: false, isOpaque: true  },
 ];

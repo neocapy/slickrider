@@ -3,7 +3,7 @@ import {
   mat4Perspective, mat4LookAt, mat4Multiply,
 } from "./math";
 import { createMaterialTextureArray } from "./textures";
-import { VERTEX_FLOATS, type WorldMesh } from "./worldmesh";
+import { VERTEX_FLOATS, type SceneMesh } from "./scenemesh";
 
 const VERTEX_STRIDE = VERTEX_FLOATS * 4; // 28 bytes
 
@@ -271,7 +271,7 @@ export class Renderer {
   private opaqueWireIndexCount: number;
   private transparentWireIndexCount: number;
 
-  constructor(device: GPUDevice, format: GPUTextureFormat, mesh: WorldMesh) {
+  constructor(device: GPUDevice, format: GPUTextureFormat, mesh: SceneMesh) {
     this.device = device;
     this.canvasFormat = format;
 
